@@ -466,7 +466,7 @@ Every feature, fix or chore is a **work item** with a number and a title. Each o
 3. **Approval.** Only the user approves. Set `Status: Approved` only after they say so explicitly. No code before that.
 4. **Implement** to the brief, committing as in §14. If the design has to change, stop, update the brief, and get the change approved.
 5. **Verify:** the brief's test plan, `go test -race ./...`, and the security checks in §13.
-6. **Close:** set `Status: Done`, record any deviation in the brief, update this file if scope or architecture moved, then open the PR.
+6. **Close:** set `Status: Done`, record any deviation in the brief, update this file if scope or architecture moved, then prepare the PR (§14).
 
 **What a brief must make clear** (the template has a section for each):
 - What the feature does from the user's side, and what it deliberately doesn't.
@@ -515,7 +515,11 @@ Security is checked at fixed points, not when someone remembers.
 - One commit per file, or per group of files that form one logical change (a package plus its test, say). Don't mix unrelated changes in one commit, and don't split one change across commits that don't build on their own. Every commit must build and pass its tests.
 - Stage files explicitly by path. Never use `git add -A` or `git add .`.
 
-**Pull requests** are opened only for feature work items or when the user asks. Setup and docs-only changes are committed and pushed straight to `main`. A PR is scoped to one issue or work item.
+**Pushing and opening PRs.**
+- The agent commits; the maintainer pushes. The agent never runs `git push` or `gh pr create`.
+- When a PR is due, the agent creates the branch, makes the commits, and gives the maintainer the PR title, the body, and a prefilled link that opens GitHub's PR form once the branch is pushed: `https://github.com/R7rainz/gomux/compare/main...<branch>?expand=1&title=<url-encoded>&body=<url-encoded>`.
+
+**Pull requests** are opened only for feature work items or when the user asks. Setup and docs-only changes are committed straight to `main`. A PR is scoped to one issue or work item.
 - Title: same structure as commits.
 - Body: short and precise, enough to understand the change without extra explanation.
   - **What:** 1–3 bullets on what changed.
