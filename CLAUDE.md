@@ -27,23 +27,30 @@ It works over SSH if installed on the remote host, but SSH use does not drive de
 
 ## 2. Current state
 
-Scaffold only: `go.mod` (module `github.com/R7rainz/gomux`, Go 1.27.3) and a placeholder `cmd/main.go`. `internal/` is empty. There are no dependencies, tests, CI or license yet. The next step is Phase 0 (see §9).
+Phase 0 is done (work item 001):
+- MIT `LICENSE` and `README.md`.
+- `cmd/gomux/main.go`, which only handles `--version`.
+- CI in `.github/workflows/ci.yml`.
+- `.goreleaser.yaml` (snapshot builds only, no publishers yet).
+
+There is no multiplexer code and there are no dependencies yet. Next: work item 002, the prototype spike (§9).
 
 ## 3. Commands
 
-These are the planned commands. Phase 0 moves `main` to `cmd/gomux/`; until then use `./cmd`.
+Commands that name packages which don't exist yet become useful as later phases land. Tool versions match the pins in `.github/workflows/ci.yml`; keep them in sync.
 
 ```sh
-go run ./cmd/gomux                              # client; autostarts the server
-go build -o bin/gomux ./cmd/gomux
+go run ./cmd/gomux                              # client; autostarts the server (from item 007)
+go build -o bin/gomux ./cmd/gomux               # plain `go build ./...` drops a ./gomux binary (git-ignored)
 go test ./...
 go test -race ./...                             # required before every change lands; the server is concurrent
 go test ./internal/layout -run '^TestSplit$' -v # single test
 go test ./internal/proto -fuzz FuzzDecode -fuzztime 30s
-go vet ./... && staticcheck ./...
-govulncheck ./...                               # known-vulnerability scan of code + deps (§13)
+go vet ./...
+go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
+go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...   # known-vulnerability scan of code + deps (§13)
+go run github.com/goreleaser/goreleaser/v2@v2.20.2 release --snapshot --clean  # packaging dry run into dist/; first run compiles goreleaser (~4 min)
 grep -H '^Status:' docs/briefs/*.md             # status of every work item (§12)
-goreleaser release --snapshot --clean           # local packaging dry run, once .goreleaser.yaml exists
 ```
 
 Keep a dev build away from an installed gomux: `GOMUX_SOCKET=/tmp/gomux-dev.sock bin/gomux ...`. Debug the server with `bin/gomux server --foreground --log-level debug` (logs go to stderr). Both are Phase 1 deliverables because a daemon is undebuggable without them.
@@ -128,7 +135,7 @@ gomux --version           binary version + protocol version
 ### 6.1 Processes and socket
 
 - One binary. `gomux server` is the server; every other subcommand is a client.
-- **Autostart:** if the socket is not accepting connections, the client removes a stale socket (connect fails with ECONNREFUSED), re-execs itself as `gomux server` with `SysProcAttr{Setsid: true}` and stdio on `/dev/null`, then waits for the socket. Go cannot fork, so re-exec is the way to daemonize.
+- **Autostart:** only commands that create a session (`gomux`, `new`, `open`) start a server. `ls`, `attach`, `kill` and `kill-server` print "no server running" instead. If the socket is not accepting connections, the client removes a stale socket (connect fails with ECONNREFUSED), re-execs itself as `gomux server` with `SysProcAttr{Setsid: true}` and stdio on `/dev/null`, then waits for the socket. Go cannot fork, so re-exec is the way to daemonize.
 - **Socket path:** `$GOMUX_SOCKET`, else `$XDG_RUNTIME_DIR/gomux/default.sock`, else `$TMPDIR/gomux-$UID/default.sock` (macOS has no `XDG_RUNTIME_DIR`; `$TMPDIR` falls back to `/tmp`). The directory is 0700 and the socket 0600. The server checks the peer UID (`SO_PEERCRED` on Linux, `LOCAL_PEERCRED`/getpeereid on macOS) and rejects other users.
 - The server is the source of truth for runtime state, outlives its clients, and exits when the last session ends.
 - **Upgrades:** `brew upgrade` or `apt upgrade` does not restart a running server. The client sends its protocol version in the handshake. On a mismatch it prints which versions are involved and the two ways out: `gomux kill-server` (ends sessions) or keep using the old binary until done. It never talks across versions silently.
@@ -197,7 +204,7 @@ IDs are monotonically increasing integers per server. They are never reused and 
 - **Server → client:** on attach, the full window state (pane rects, metadata) plus a full screen for each visible pane. After that, per-pane dirty lines (cells as style runs) and the cursor.
 - **The client composes** pane contents at their rects, borders, the status bar, the palette and overlays, using Bubble Tea and Lipgloss.
 - **Input:** prefix and bound keys are handled in the client and become requests. Everything else is sent as bytes to the active pane. Pressing the prefix twice sends it through literally. Mouse events over a pane go to the app (translated to pane coordinates) if it enabled mouse mode; otherwise gomux uses them for focus and scrolling. Keep the ESC/alt disambiguation delay short (≤25 ms by default); tmux's 500 ms default is a well-known vim annoyance.
-- **Risk, to spike in Phase 2:** turning Bubble Tea key events back into the exact bytes apps expect (alt/ctrl combinations, function keys, bracketed paste) may lose information. If it does, the client reads raw stdin, detects the prefix itself, and uses Bubble Tea only for rendering and overlays.
+- **Risk, settled by the prototype spike (item 002):** turning Bubble Tea key events back into the exact bytes apps expect (alt/ctrl combinations, function keys, bracketed paste) may lose information. If it does, the client reads raw stdin, detects the prefix itself, and uses Bubble Tea only for rendering and overlays.
 
 ### 6.8 IPC protocol (`internal/proto`)
 
@@ -314,7 +321,7 @@ type Plugin interface {
 | Need | Choice | Why / notes |
 |---|---|---|
 | PTY | `github.com/creack/pty` | De facto standard, pure Go, Linux/macOS/BSD. No Windows, which matches the non-goal. |
-| VT emulation | **Spike in Phase 2.** Candidates: `charmbracelet/x/vt`, `vito/midterm`, `hinshun/vt10x`. `danielgatis/go-vte` is a parser only. | Don't write our own emulator. Test each candidate with nvim, htop, lazygit, fish and less. Check alternate screen, scroll regions, wide characters and emoji, truecolor, query replies, undercurl, and maintenance activity. `x/vt` is from the same org as Bubble Tea and Lipgloss. |
+| VT emulation | **Decided by the prototype spike (item 002).** Candidates: `charmbracelet/x/vt`, `vito/midterm`, `hinshun/vt10x`. `danielgatis/go-vte` is a parser only. | Don't write our own emulator. Test each candidate with nvim, htop, lazygit, fish and less. Check alternate screen, scroll regions, wide characters and emoji, truecolor, query replies, undercurl, and maintenance activity. `x/vt` is from the same org as Bubble Tea and Lipgloss. |
 | Client UI | Bubble Tea + Lipgloss | From the spec. Bubble Tea is for the interface only, not PTYs or emulation. Prefer v2 (cell-based renderer, better key handling) if it is stable; verify. |
 | Config | `github.com/BurntSushi/toml` | `MetaData.Undecoded()` provides unknown-key warnings. |
 | System stats | `github.com/shirou/gopsutil` | Cross-platform without cgo. Imported only by the sysmon plugin. |
@@ -344,25 +351,30 @@ type Plugin interface {
 
 ## 9. Roadmap
 
-This is the spec's phase order with three deliberate changes, marked ⚠. Each phase ends with its exit criteria met and `go test -race ./...` green.
+This is the spec's phase order with four deliberate changes, marked ⚠. Each phase ends with its exit criteria met and `go test -race ./...` green.
 
-0. **Repo hygiene.**
+0. **Repo hygiene.** ✓ Done (item 001).
    - LICENSE, README.
-   - Move `main` to `cmd/gomux/`, so `go install …/cmd/gomux@latest` names the binary `gomux`; with `main` in `cmd/` it would be named `cmd`.
-   - CI on ubuntu and macOS: vet, staticcheck, `test -race`, `govulncheck`, plus a weekly scheduled `govulncheck` run.
+   - `main` moved to `cmd/gomux/`, so `go install …/cmd/gomux@latest` names the binary `gomux`; with `main` in `cmd/` it would be named `cmd`.
+   - CI on ubuntu and macOS: vet, staticcheck, `test -race`, `govulncheck`, plus a weekly scheduled run.
    - `.goreleaser.yaml` with a snapshot build in CI, so packaging never rots.
+- **Prototype spike** (item 002; throwaway branch, never merged).
+  - One process: a shell in a PTY, drawn through a candidate emulator inside a Bubble Tea box.
+  - Decides the emulator library, the input path and Bubble Tea v1 or v2 (§11, items 1–3), and records them in §7 and §6.7.
+  - ⚠ Moved ahead of Phase 1 from the spec's Phase 2. These are the biggest unknowns, and the server is built on their answers.
 1. **Foundation.**
    - Config defaults and paths; proto framing and handshake.
-   - Server autostart, socket permissions, peer check, stale-socket handling.
+   - Socket permissions, peer check, stale-socket handling.
    - `server --foreground`, `kill-server`, `ls`.
-   - Exit: the client autostarts the server, `ls` round-trips, and a version mismatch fails cleanly.
+   - The server is started by hand in this phase. Autostart comes with the first session (`gomux new`, item 007), because only session-creating commands start a server (§6.1).
+   - Exit: `ls` round-trips ("no sessions"); `kill-server` stops the server and removes the socket; `ls` with no server prints "no server running"; a version mismatch fails cleanly.
 2. **Terminal engine.**
-   - Emulator spike and decision, recorded in §7. Input-path spike and decision, recorded in §6.7.
+   - Built on the emulator and input path chosen by the prototype spike.
    - PTY spawn, I/O, resize, exit, kill. A single pane rendered from emulator snapshots and updates.
    - Exit: nvim, htop and fish are usable in one pane, resize works, and no zombie processes are left.
    - ⚠ VT emulation moves here from the spec's Phase 5. Splits and reattach both need server-side screen state, so they cannot be built on raw byte forwarding. Phase 5 hardens the emulator.
 3. **Sessions.**
-   - new, ls, attach, detach, kill, rename; multiple sessions; the detach keybinding; `GOMUX` environment variables; the nested-attach guard.
+   - new (with server autostart), ls, attach, detach, kill, rename; multiple sessions; the detach keybinding; `GOMUX` environment variables; the nested-attach guard.
    - Exit: close the terminal, reattach, and the process is still running with its screen intact.
 4. **Windows and panes.**
    - The layout package; split, close, navigate, resize, zoom; windows; status bar; mouse focus and scroll.
@@ -397,8 +409,8 @@ Target installs: `brew install`, `yay -S` / `paru -S` (AUR helpers that wrap pac
 **Versioning.** The version is set with `-ldflags "-X main.version=…"`, falling back to `debug.ReadBuildInfo()` for `go install` builds. `gomux --version` prints the binary version and the protocol version.
 
 **Before the first release:**
-- A LICENSE. homebrew-core, the AUR and Debian all expect an OSI license; MIT, Apache-2.0 or ISC (which tmux uses).
-- `main` at `cmd/gomux/` (Phase 0).
+- ✓ LICENSE: MIT (homebrew-core, the AUR and Debian all expect an OSI license).
+- ✓ `main` at `cmd/gomux/`.
 - Confirm the name `gomux` is free in homebrew-core, the AUR and the Debian/Ubuntu archives.
 - A man page and bash/zsh/fish completions in the repo, shipped in every package.
 
@@ -439,14 +451,13 @@ Target installs: `brew install`, `yay -S` / `paru -S` (AUR helpers that wrap pac
 
 Resolve each one, then record the answer in the section it affects.
 
-1. VT emulator library (Phase 2 spike) → §7.
-2. Input path: Bubble Tea key events or raw-stdin pass-through (Phase 2 spike) → §6.7.
-3. Bubble Tea v1 or v2 → §7.
-4. License → §10.
-5. Default prefix key: `ctrl-space` (conflicts with macOS input switching and editor completion) or `ctrl-a`/`ctrl-b` → §6.9.
-6. Server exits when the last session ends (assumed yes, like tmux) → §6.1.
-7. Size policy for multiple clients (assumed: latest active client wins) → §6.6.
-8. External plugin ABI (Phase 8 spike) → §6.12.
+1. VT emulator library (prototype spike, item 002) → §7.
+2. Input path: Bubble Tea key events or raw-stdin pass-through (prototype spike, item 002) → §6.7.
+3. Bubble Tea v1 or v2 (prototype spike, item 002) → §7.
+4. Default prefix key: `ctrl-space` (conflicts with macOS input switching and editor completion) or `ctrl-a`/`ctrl-b` → §6.9.
+5. Server exits when the last session ends (assumed yes, like tmux) → §6.1.
+6. Size policy for multiple clients (assumed: latest active client wins) → §6.6.
+7. External plugin ABI (Phase 8 spike) → §6.12.
 
 ## 12. Work items and briefs
 
