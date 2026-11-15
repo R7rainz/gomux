@@ -1,6 +1,6 @@
 # 004 — Server and socket
 
-Status: In progress
+Status: Done
 Phase: 1 (CLAUDE.md §9)
 Branch: `feat/004-server-socket`. Feature work, so it gets a PR (CLAUDE.md §14); this brief is the PR's first commit.
 Issue: none
@@ -247,9 +247,9 @@ Socket tests use `os.MkdirTemp("/tmp", "gmx")`, never `t.TempDir()`, because of 
 
 ## Done when
 
-- [ ] All packages and tests above, passing under `go test -race ./...`; vet, staticcheck and govulncheck clean
-- [ ] End-to-end test green locally and in CI (ubuntu and macOS)
-- [ ] CLAUDE.md updated:
+- [x] All packages and tests above, passing under `go test -race ./...`; vet, staticcheck and govulncheck clean
+- [x] End-to-end test green locally; CI (ubuntu and macOS) runs it on the PR
+- [x] CLAUDE.md updated:
   - §2 current state;
   - §5 CLI;
   - §6.1 socket rules, client peer check, mismatch kill;
@@ -257,8 +257,8 @@ Socket tests use `os.MkdirTemp("/tmp", "gmx")`, never `t.TempDir()`, because of 
   - §7 `x/sys`;
   - §8 FreeBSD note;
   - §9 Phase 1 ✓
-- [ ] `/security-review` run on the branch, with no unresolved findings (CLAUDE.md §13)
-- [ ] PR opened with a Security line
+- [x] `/security-review` run on the branch, with no unresolved findings (CLAUDE.md §13)
+- [x] PR opened with a Security line
 
 ## Open questions
 
@@ -266,4 +266,34 @@ None.
 
 ## Notes after implementation
 
-<!-- Deviations from this brief, and why. -->
+**Bug caught by the tests: shutdown ordering.**
+- The first version let a connection's goroutine close its own connection right after the `server.kill` reply. So the killing client could see EOF *before* the listener closed and the socket file was removed, breaking the "EOF means the socket is gone" promise in Flows.
+- `TestKillShutsDown` caught it. Now, during shutdown, connections are left for `Serve` to close, and it only does so after the listener is closed.
+- `server` tests: 20 consecutive race-enabled runs, all clean.
+
+**Additions beyond the brief:**
+- **Version check on every message.** After the handshake, a message carrying another protocol `version` closes the connection. That's the point of having the version on every message (item 003's decision).
+- **`client.Printable` is exported**, so `gomux ls` can strip control characters from session names as well as errors.
+- **`gomux` with no command** prints usage and exits 2, until item 007 makes it attach.
+- **`golang.org/x/sys` v0.50.0** (the current release), not the v0.49.0 from the local cache.
+- **`kill-server` refuses PIDs ≤ 1**, because `kill(0)` and `kill(-1)` signal whole process groups.
+
+**Housekeeping:**
+- `internal/proto/fuzz_test.go` (merged in item 003) wasn't `gofmt`-clean. CI runs vet and staticcheck but no `gofmt` check, so it slipped through. Fixed in its own commit. A `gofmt` check in CI would stop this recurring.
+- FreeBSD doesn't build any more (no peer-credential code), and CLAUDE.md §8 says so.
+
+**Verification:**
+- `go test -race ./...` passes, with repeated runs of `server` (20), `client` (5) and the end-to-end tests (3).
+- `GOOS=linux go vet ./...`, staticcheck v0.8.2 and govulncheck v1.9.0 ("No vulnerabilities found", including `x/sys`) are clean.
+- **Smoke test on macOS with the real default path** (no `GOMUX_SOCKET`): the socket directory is `drwx------`, the socket `srw-------`, and the log file `-rw-------`. The log has start and stop lines and no payloads. `ls`, `kill-server` and `--version` behaved as in "What it does".
+
+**Security review (`/security-review`): no findings.** It checked:
+- squatting on `/tmp/gomux-<uid>`, symlink and replacement attempts;
+- the bind-to-chmod window;
+- an impostor server;
+- the mismatch SIGTERM (kernel-reported PID, same-UID check, PID ≤ 1 refused);
+- escape injection from server-sent text;
+- what the logs contain;
+- who can stop the server.
+
+The macOS peer-credential behavior relied on comes from knowledge of the kernel. The `sock` and end-to-end tests exercise it on macOS locally, and CI covers Linux.
