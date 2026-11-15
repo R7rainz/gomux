@@ -14,9 +14,9 @@ func FuzzRead(f *testing.F) {
 		f.Fatal(err)
 	}
 	f.Add(valid.Bytes())
-	f.Add(valid.Bytes()[:valid.Len()-3]) // truncated body
-	f.Add([]byte{0xff, 0xff, 0xff, 0xff})  // length far over MaxFrame
-	f.Add([]byte{0, 0, 0, 0})              // zero length
+	f.Add(valid.Bytes()[:valid.Len()-3])  // truncated body
+	f.Add([]byte{0xff, 0xff, 0xff, 0xff}) // length far over MaxFrame
+	f.Add([]byte{0, 0, 0, 0})             // zero length
 	f.Add(frame(`{"type":"x","payload":[1,{"a":"é<>"}],"error":{"code":"c"}}`))
 	f.Add(frame("{\"type\":\"\xff\xfe\"}")) // invalid UTF-8
 	f.Add([]byte("garbage that is not a frame"))
