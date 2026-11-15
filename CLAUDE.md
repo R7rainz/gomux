@@ -46,7 +46,7 @@ go build -o bin/gomux ./cmd/gomux               # plain `go build ./...` drops a
 go test ./...
 go test -race ./...                             # required before every change lands; the server is concurrent
 go test ./internal/layout -run '^TestSplit$' -v # single test
-go test ./internal/proto -fuzz FuzzDecode -fuzztime 30s
+go test ./internal/proto -run '^$' -fuzz FuzzRead -fuzztime 30s
 go vet ./...
 go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
 go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...   # known-vulnerability scan of code + deps (§13)
@@ -220,9 +220,21 @@ IDs are monotonically increasing integers per server. They are never reused and 
 
 ### 6.8 IPC protocol (`internal/proto`)
 
-- **Frame:** a 4-byte big-endian length followed by a JSON body, with a maximum frame size (e.g. 16 MiB). The decoder is a trust boundary, so it is fuzzed.
-- **Envelope:** `{"version":1,"type":"pane.create","request_id":"123","payload":{}}`. Request types are `noun.verb`. Responses echo `request_id` and carry either a payload or `error{code, message}`. Server events carry a type and no `request_id`.
-- **Handshake:** the first client frame is `hello` (protocol version, client version, terminal size, TERM, environment). The server answers `welcome`, or `error{code:"version_mismatch"}` and closes the connection.
+Implemented in item 003; `internal/proto/proto.go` is the reference.
+
+- **Frame:** a 4-byte big-endian length followed by a JSON body, at most `proto.MaxFrame` (16 MiB).
+  - The decoder is a trust boundary, so it is fuzzed (`FuzzRead`).
+  - Any read error closes the connection; there is no resync.
+- **Envelope:** `{"version":1,"type":"pane.create","request_id":"123","payload":{}}`.
+  - `version` is the protocol version (`proto.Version`) and is on every message.
+  - Request types are `noun.verb`. **A response repeats its request's `type` and `request_id`** and carries either a `payload` or `error{code, message}`. Server events carry a type and no `request_id`.
+- **Handshake:**
+  - The first client frame is `hello`, with payload `{"client_version": …}`; its envelope `version` is the client's protocol version.
+  - The server replies `hello` with `{"server_version": …}`, or with `error{code:"version_mismatch"}` and closes the connection.
+  - A first frame other than `hello` closes the connection.
+  - Terminal size, TERM and environment are not in `hello`; they travel in the requests that need them (§6.6).
+- **Compatibility:** unknown fields are ignored, so optional fields can be added within a version. Anything an older peer would misread bumps `proto.Version`.
+- **Encoding:** JSON is written without HTML escaping, so `<`, `>` and `&` aren't inflated into 6-byte escapes.
 - Input travels as events (§6.7): key events, paste text and mouse events, not raw bytes.
 - `shortcut: screen updates are JSON too; if profiling shows encoding or bandwidth cost, add a binary frame type behind the same length prefix.`
 
@@ -483,6 +495,7 @@ Every feature, fix or chore is a **work item** with a number and a title. Each o
 - Brief: `docs/briefs/NNN-kebab-title.md`, copied from `docs/briefs/TEMPLATE.md`.
 - Branch: `<type>/NNN-kebab-title`, e.g. `feat/007-layout-tree`.
 - One work item = one branch = one PR. A roadmap phase splits into several work items, each small enough to review in one sitting.
+- **Where the brief is committed:** for feature work (items that get a PR), the approved brief is the PR's first commit, so the plan and the code are reviewed together. Setup and docs items commit their brief straight to `main`.
 
 **Status** is the `Status:` line at the top of each brief: `Draft → Approved → In progress → Done` (or `Dropped`). List all of them with `grep -H '^Status:' docs/briefs/*.md`.
 
