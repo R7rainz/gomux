@@ -556,6 +556,7 @@ Security is checked at fixed points, not when someone remembers.
 
 **Pushing and opening PRs.**
 - The agent commits; the maintainer pushes. The agent never runs `git push` or `gh pr create`.
+- PRs are merged on GitHub with **Rebase and merge**, so the structured commits land on `main` unchanged and history stays linear.
 - When a PR is due, the agent creates the branch, makes the commits, and gives the maintainer the PR title, the body, and a prefilled link that opens GitHub's PR form once the branch is pushed: `https://github.com/R7rainz/gomux/compare/main...<branch>?expand=1&title=<url-encoded>&body=<url-encoded>`.
 
 **Pull requests** are opened only for feature work items or when the user asks. Setup and docs-only changes are committed straight to `main`. A PR is scoped to one issue or work item.
