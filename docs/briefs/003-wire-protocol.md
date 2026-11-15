@@ -1,6 +1,6 @@
 # 003 — Wire protocol
 
-Status: In progress
+Status: Done
 Phase: 1 (CLAUDE.md §9)
 Branch: `feat/003-wire-protocol`. Feature work, so it gets a PR (CLAUDE.md §14); this brief is the PR's first commit.
 Issue: none
@@ -150,13 +150,13 @@ None. The package holds no state, goroutines or files; callers own their connect
 
 ## Done when
 
-- [ ] `internal/proto` with `Read`, `Write`, the envelope, the error type and the `hello` types
-- [ ] Unit tests and the fuzz test (seeds via `f.Add`), all passing under `go test -race ./...`
-- [ ] 30 s and 2 min local fuzz runs find nothing
-- [ ] `/security-review` run on the branch, with no unresolved findings
-- [ ] `go vet`, staticcheck and `govulncheck ./...` clean
-- [ ] CLAUDE.md §6.8 updated (response `type` rule, version in the envelope, `hello` payload)
-- [ ] Security checks for this item done (CLAUDE.md §13); PR prepared with a Security line
+- [x] `internal/proto` with `Read`, `Write`, the envelope, the error type and the `hello` types
+- [x] Unit tests and the fuzz test (seeds via `f.Add`), all passing under `go test -race ./...`
+- [x] 30 s and 2 min local fuzz runs find nothing
+- [x] `/security-review` run on the branch, with no unresolved findings
+- [x] `go vet`, staticcheck and `govulncheck ./...` clean
+- [x] CLAUDE.md §6.8 updated (response `type` rule, version in the envelope, `hello` payload)
+- [x] Security checks for this item done (CLAUDE.md §13); PR prepared with a Security line
 
 ## Open questions
 
@@ -164,4 +164,23 @@ None.
 
 ## Notes after implementation
 
-<!-- Deviations from this brief, and why. -->
+**Corrections made at approval** (already applied to the sections above):
+- Fuzz seeds live in the test code (`f.Add`), not in a committed `testdata/` corpus. The fuzzer writes to `testdata/fuzz/` only when it finds a failure.
+- `Write` encodes with HTML escaping off, so `<`, `>` and `&` aren't inflated into 6-byte escapes.
+
+**Verification:**
+- `go test -race ./...`, `go vet`, staticcheck v0.8.2 and govulncheck v1.9.0 ("No vulnerabilities found") are all clean.
+- `FuzzRead` found nothing in 30 s (about 7.0M runs) or 2 min (about 25.7M runs).
+
+**Security review (`/security-review`):** no findings at or above the reporting threshold. It confirmed:
+- the length is checked before any allocation;
+- an error never resyncs;
+- decoding uses only concrete types;
+- a frame can't be forged through `Write`;
+- nothing is logged.
+
+One item to track, already required by CLAUDE.md §13: once the client displays server-sent text (error messages, titles, status), it must strip control characters first.
+
+**Also in this PR:**
+- the CLAUDE.md §12 rule that a feature's brief is committed inside its PR;
+- the §14 rule that PRs are merged with Rebase and merge (decided while planning item 004).
