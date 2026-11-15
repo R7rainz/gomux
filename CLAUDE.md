@@ -27,13 +27,14 @@ It works over SSH if installed on the remote host, but SSH use does not drive de
 
 ## 2. Current state
 
-Phase 0 is done (work item 001):
+Phase 0 (work item 001) and the prototype spike (work item 002) are done:
 - MIT `LICENSE` and `README.md`.
 - `cmd/gomux/main.go`, which only handles `--version`.
 - CI in `.github/workflows/ci.yml`.
 - `.goreleaser.yaml` (snapshot builds only, no publishers yet).
+- The spike chose the emulator (`x/vt`), the UI library (Bubble Tea v2) and the input path (§6.7, §7). Its code was thrown away.
 
-There is no multiplexer code and there are no dependencies yet. Next: work item 002, the prototype spike (§9).
+There is no multiplexer code and there are no dependencies yet. Next: Phase 1, starting with work item 003 (wire protocol).
 
 ## 3. Commands
 
@@ -161,6 +162,9 @@ Dependencies point one way: `client → proto, config`; `server → proto, layou
 
 - **One event-loop goroutine** in the server owns every session, window, pane and layout. Client connections and panes talk to it over channels, and it never blocks on I/O. This replaces lock-per-struct designs.
 - **Each pane** has a reader goroutine that continuously drains the PTY master into the pane's emulator (guarded by its own mutex), marks the pane dirty and notifies the loop. It must never stall: if nobody reads the PTY, the program in the pane blocks on write. A second goroutine waits on `cmd.Wait()`, reaps the process and reports its exit status.
+- **Each pane's emulator reply pipe** (`x/vt`): query replies and encoded input both come out of `emu.Read`, an `io.Pipe` that blocks the emulator until someone reads. One goroutine per pane drains it into the PTY. Two caveats found in the spike:
+  - Replies are written while the emulator's lock is held. If the app stops reading its input and the PTY's input buffer fills, the drain blocks, and with it the pane's emulator writes and screen reads. Drain into a buffer and write to the PTY from a separate goroutine, so a stuck app can stall only its own input.
+  - In `x/vt` v0.1.0, `Close()` races with a concurrent `Read` (an unsynchronized flag, found with the race detector). End the drain by closing `emu.InputPipe()` instead, until this is fixed upstream.
 - **Each client** has a reader goroutine (decode frames → loop) and a writer goroutine with a bounded queue. If a client is slow, its queued screen updates are dropped and replaced by a fresh snapshot. A slow client never blocks the loop or a pane.
 - **Render tick:** dirty panes go out to clients at most about 60 times per second, so `cat bigfile` cannot flood the socket.
 - Every goroutine has an owner and a `context` for shutdown. `go test -race` must pass.
@@ -188,8 +192,10 @@ IDs are monotonically increasing integers per server. They are never reused and 
 
 ### 6.6 Terminal engine (`internal/term`)
 
-- **Spawn** with `pty.StartWithSize` (creack/pty). The shell is `general.shell`, else `$SHELL`, else `/bin/sh`, started as a login shell (argv0 `-zsh`, like tmux) so the profile's PATH loads. This matters on macOS.
-- **Environment:** a new session inherits the environment of the client that created it, sent in the request. The server's own environment may be stale (PATH, virtualenvs). Panes also get `TERM=xterm-256color`, `COLORTERM=truecolor`, `GOMUX=<socket path>` and `GOMUX_PANE=<pane id>`. `TERM` must advertise only what the emulator actually implements. Shipping our own terminfo entry is a non-goal.
+- **Spawn** with `pty.StartWithSize` (creack/pty). The shell is `general.shell`, else `$SHELL`, else `/bin/sh`, started as a login shell (argv0 prefixed with `-`, e.g. `-fish`, like tmux) so the profile's PATH loads. This matters on macOS. Which shell it is never matters (§8).
+- **Environment:** a new session inherits the environment of the client that created it, sent in the request. The server's own environment may be stale (PATH, virtualenvs). Panes also get `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=gomux`, `GOMUX=<socket path>` and `GOMUX_PANE=<pane id>`.
+  - Variables identifying the outer terminal are removed: `TERM_PROGRAM_VERSION`, `TERMINFO`, and `GHOSTTY_*` for Ghostty (add other terminals' variables as they're found). Otherwise shells and apps detect the outer terminal and use features our emulator doesn't implement.
+  - `TERM` must advertise only what the emulator actually implements. Shipping our own terminfo entry is a non-goal.
 - **Output:** PTY bytes go into the emulator (screen, alternate screen, cursor, modes, scrollback ring). Output is never treated as plain text.
 - **Query replies:** the emulator's answers to device attributes, cursor-position reports and OSC 10/11 color queries are written back to the PTY. Without them, apps such as nvim and fish stall or misbehave.
 - **Resize:** client SIGWINCH → `resize` message → server recomputes the layout → `pty.Setsize` per pane (the kernel delivers SIGWINCH to the pane's foreground process group) → emulator resize. With several clients on one session, the most recently active client's size wins.
@@ -203,15 +209,21 @@ IDs are monotonically increasing integers per server. They are never reused and 
 - **The server runs the emulators; clients never parse pane output.** A reattaching client needs the current screens, and several clients must see the same thing.
 - **Server → client:** on attach, the full window state (pane rects, metadata) plus a full screen for each visible pane. After that, per-pane dirty lines (cells as style runs) and the cursor.
 - **The client composes** pane contents at their rects, borders, the status bar, the palette and overlays, using Bubble Tea and Lipgloss.
-- **Input:** prefix and bound keys are handled in the client and become requests. Everything else is sent as bytes to the active pane. Pressing the prefix twice sends it through literally. Mouse events over a pane go to the app (translated to pane coordinates) if it enabled mouse mode; otherwise gomux uses them for focus and scrolling. Keep the ESC/alt disambiguation delay short (≤25 ms by default); tmux's 500 ms default is a well-known vim annoyance.
-- **Risk, settled by the prototype spike (item 002):** turning Bubble Tea key events back into the exact bytes apps expect (alt/ctrl combinations, function keys, bracketed paste) may lose information. If it does, the client reads raw stdin, detects the prefix itself, and uses Bubble Tea only for rendering and overlays.
+- **Input travels as events, not bytes** (decided by the prototype spike, item 002).
+  - The client receives Bubble Tea v2's key, paste and mouse events. Prefix and bound keys become commands.
+  - Everything else goes to the server as events: key events (code, text, modifiers), paste text, and mouse events translated to pane coordinates.
+  - The server feeds them to the pane's emulator (`SendKey`, `Paste`, `SendMouse`), which encodes them according to the modes the app turned on: application cursor keys, bracketed paste, mouse modes. Only the emulator knows those modes, so encoding has to happen next to it.
+  - Pressing the prefix twice sends it through literally. Mouse events reach the app only if it enabled mouse mode; otherwise gomux uses them for focus and scrolling.
+  - Keep the ESC/alt disambiguation delay short (≤25 ms by default); tmux's 500 ms default is a well-known vim annoyance.
+- **Rejected: raw stdin pass-through.** The outer terminal encodes keys according to *its* modes, not the inner app's. Arrows in vim, paste markers and mouse coordinates would all need translating, which means re-implementing what the emulator already does.
+- **Known limit:** `x/vt` v0.1.0 encodes keys the legacy way only. The kitty keyboard protocol is an upstream TODO (see "Later" in §5).
 
 ### 6.8 IPC protocol (`internal/proto`)
 
 - **Frame:** a 4-byte big-endian length followed by a JSON body, with a maximum frame size (e.g. 16 MiB). The decoder is a trust boundary, so it is fuzzed.
 - **Envelope:** `{"version":1,"type":"pane.create","request_id":"123","payload":{}}`. Request types are `noun.verb`. Responses echo `request_id` and carry either a payload or `error{code, message}`. Server events carry a type and no `request_id`.
 - **Handshake:** the first client frame is `hello` (protocol version, client version, terminal size, TERM, environment). The server answers `welcome`, or `error{code:"version_mismatch"}` and closes the connection.
-- Byte payloads (keyboard input) are `[]byte`, which `encoding/json` encodes as base64.
+- Input travels as events (§6.7): key events, paste text and mouse events, not raw bytes.
 - `shortcut: screen updates are JSON too; if profiling shows encoding or bandwidth cost, add a binary frame type behind the same length prefix.`
 
 ### 6.9 Configuration (`internal/config`)
@@ -273,6 +285,7 @@ refresh_interval = 10
 - **Trust:** a cloned repo must never run commands on its own. The first `open` of a file, and any `open` after its contents change, lists the commands it will run and asks y/N. Approvals are stored as path + SHA-256 in `~/.local/state/gomux/trusted.toml` (the same idea as `direnv allow`).
 - **Pane commands are typed into an interactive shell** rather than run as the pane's process. When `go test ./...` finishes, the pane stays open with its output, and ↑ reruns it.
 - **Schema** (from the spec): `name`; `[workspace] layout, working_directory`; `[[panes]] name, command`; `[plugins] enabled`; `[tasks]` for the tasks plugin. `layout` must name one of the built-in layouts.
+- **Shared project files:** pane commands are typed into each user's own shell. A file shared by a team should use commands valid in every shell (`go test ./...`), not shell-specific syntax; zsh's `$((…))`, for example, breaks for fish users.
 
 ### 6.11 Command registry and palette
 
@@ -320,9 +333,9 @@ type Plugin interface {
 
 | Need | Choice | Why / notes |
 |---|---|---|
-| PTY | `github.com/creack/pty` | De facto standard, pure Go, Linux/macOS/BSD. No Windows, which matches the non-goal. |
-| VT emulation | **Decided by the prototype spike (item 002).** Candidates: `charmbracelet/x/vt`, `vito/midterm`, `hinshun/vt10x`. `danielgatis/go-vte` is a parser only. | Don't write our own emulator. Test each candidate with nvim, htop, lazygit, fish and less. Check alternate screen, scroll regions, wide characters and emoji, truecolor, query replies, undercurl, and maintenance activity. `x/vt` is from the same org as Bubble Tea and Lipgloss. |
-| Client UI | Bubble Tea + Lipgloss | From the spec. Bubble Tea is for the interface only, not PTYs or emulation. Prefer v2 (cell-based renderer, better key handling) if it is stable; verify. |
+| PTY | `github.com/creack/pty` v1.1.24 | De facto standard, pure Go, Linux/macOS/BSD. No Windows, which matches the non-goal. Its `v2` tag (2023) never became a release; v1 is the maintained line. |
+| VT emulation | `github.com/charmbracelet/x/vt` v0.1.0 | **Chosen by the prototype spike (item 002).** MIT, maintained by Charm, and shares its cell model (`ultraviolet`, `x/ansi`) with Bubble Tea v2.<br>• Passed every headless fixture: truecolor, alternate screen, scroll regions, wide characters and emoji, replies to DA, cursor-position and OSC 11 queries.<br>• Passed both security fixtures: it ignores title reports and clipboard reads.<br>• Encodes keys, paste and mouse by the app's modes.<br>• Worked with sh, dash, bash, zsh, fish, vim, nvim, lazygit, btop and less.<br>Caveats are in §6.3. Rejected: `vito/midterm` (breaks on emoji, doesn't answer OSC 11, has no key encoder, not goroutine-safe) and `hinshun/vt10x` (unmaintained since 2022). |
+| Client UI | `charm.land/bubbletea/v2` v2.1.1 + `charm.land/lipgloss/v2` v2.1.1 | **v2 chosen by the spike;** v1 has had no release since September 2025. Its `View` is declarative (alternate screen, cursor position and shape, mouse mode), and its key events convert directly into the emulator's. Import from `charm.land/...`. Lipgloss v2's `Width`/`Height` include the border. Bubble Tea is for the interface only, not PTYs or emulation. |
 | Config | `github.com/BurntSushi/toml` | `MetaData.Undecoded()` provides unknown-key warnings. |
 | System stats | `github.com/shirou/gopsutil` | Cross-platform without cgo. Imported only by the sysmon plugin. |
 | WASM plugins | `github.com/tetratelabs/wazero` | Pure Go, no cgo. Phase 8 only. |
@@ -343,6 +356,10 @@ type Plugin interface {
   - **Required:** nothing.
   - **Optional:** the `git` and `docker` CLIs, for their plugins.
   - **Host terminal:** UTF-8 and 256 colors; truecolor recommended.
+- **Any shell.** gomux runs whatever shell or program the user picks and never depends on shell syntax or shell-specific integration.
+  - The shell is `general.shell`, else `$SHELL`, else `/bin/sh`.
+  - End-to-end tests run every installed shell: at least sh, dash, bash, zsh and fish (CI installs zsh and fish), plus nushell where available.
+  - The prototype passed all five installed ones.
 - **Non-functional targets** (measure, don't assume):
   - An idle server uses about 0% CPU: no timers fire when nothing changes and no client is attached.
   - Typing feels no slower than in the bare terminal.
@@ -358,9 +375,9 @@ This is the spec's phase order with four deliberate changes, marked ⚠. Each ph
    - `main` moved to `cmd/gomux/`, so `go install …/cmd/gomux@latest` names the binary `gomux`; with `main` in `cmd/` it would be named `cmd`.
    - CI on ubuntu and macOS: vet, staticcheck, `test -race`, `govulncheck`, plus a weekly scheduled run.
    - `.goreleaser.yaml` with a snapshot build in CI, so packaging never rots.
-- **Prototype spike** (item 002; throwaway branch, never merged).
-  - One process: a shell in a PTY, drawn through a candidate emulator inside a Bubble Tea box.
-  - Decides the emulator library, the input path and Bubble Tea v1 or v2 (§11, items 1–3), and records them in §7 and §6.7.
+- **Prototype spike.** ✓ Done (item 002; throwaway branch, deleted).
+  - One process: a shell in a PTY, drawn through `x/vt` inside a Bubble Tea box.
+  - Chose `x/vt`, Bubble Tea v2 and event-based input (§6.7, §7), and found the `x/vt` caveats in §6.3.
   - ⚠ Moved ahead of Phase 1 from the spec's Phase 2. These are the biggest unknowns, and the server is built on their answers.
 1. **Foundation.**
    - Config defaults and paths; proto framing and handshake.
@@ -369,9 +386,10 @@ This is the spec's phase order with four deliberate changes, marked ⚠. Each ph
    - The server is started by hand in this phase. Autostart comes with the first session (`gomux new`, item 007), because only session-creating commands start a server (§6.1).
    - Exit: `ls` round-trips ("no sessions"); `kill-server` stops the server and removes the socket; `ls` with no server prints "no server running"; a version mismatch fails cleanly.
 2. **Terminal engine.**
-   - Built on the emulator and input path chosen by the prototype spike.
+   - Built on `x/vt` with event-based input (§6.7, §7).
    - PTY spawn, I/O, resize, exit, kill. A single pane rendered from emulator snapshots and updates.
-   - Exit: nvim, htop and fish are usable in one pane, resize works, and no zombie processes are left.
+   - End-to-end tests run the shell matrix (§8) in CI.
+   - Exit: nvim, btop and fish are usable in one pane, resize works, and no zombie processes are left.
    - ⚠ VT emulation moves here from the spec's Phase 5. Splits and reattach both need server-side screen state, so they cannot be built on raw byte forwarding. Phase 5 hardens the emulator.
 3. **Sessions.**
    - new (with server autostart), ls, attach, detach, kill, rename; multiple sessions; the detach keybinding; `GOMUX` environment variables; the nested-attach guard.
@@ -451,13 +469,10 @@ Target installs: `brew install`, `yay -S` / `paru -S` (AUR helpers that wrap pac
 
 Resolve each one, then record the answer in the section it affects.
 
-1. VT emulator library (prototype spike, item 002) → §7.
-2. Input path: Bubble Tea key events or raw-stdin pass-through (prototype spike, item 002) → §6.7.
-3. Bubble Tea v1 or v2 (prototype spike, item 002) → §7.
-4. Default prefix key: `ctrl-space` (conflicts with macOS input switching and editor completion) or `ctrl-a`/`ctrl-b` → §6.9.
-5. Server exits when the last session ends (assumed yes, like tmux) → §6.1.
-6. Size policy for multiple clients (assumed: latest active client wins) → §6.6.
-7. External plugin ABI (Phase 8 spike) → §6.12.
+1. Default prefix key: `ctrl-space` (conflicts with macOS input switching and editor completion) or `ctrl-a`/`ctrl-b` → §6.9.
+2. Server exits when the last session ends (assumed yes, like tmux) → §6.1.
+3. Size policy for multiple clients (assumed: latest active client wins) → §6.6.
+4. External plugin ABI (Phase 8 spike) → §6.12.
 
 ## 12. Work items and briefs
 
