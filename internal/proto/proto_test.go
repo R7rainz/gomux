@@ -181,3 +181,12 @@ func TestHandshakeWireFormat(t *testing.T) {
 		}
 	}
 }
+
+// An empty session list must be [] on the wire, not null, so every client can
+// range over it without a nil check in its own language.
+func TestEmptySessionListIsArray(t *testing.T) {
+	b, err := json.Marshal(SessionList{Sessions: []SessionInfo{}})
+	if err != nil || string(b) != `{"sessions":[]}` {
+		t.Fatalf("got %s, %v", b, err)
+	}
+}
