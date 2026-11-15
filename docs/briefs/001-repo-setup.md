@@ -1,6 +1,6 @@
 # 001 — Repo setup
 
-Status: In progress
+Status: Done
 Phase: 0 (CLAUDE.md §9)
 Branch: none — setup work is committed straight to `main` (CLAUDE.md §14)
 Issue: none
@@ -147,7 +147,7 @@ Supply chain, which this item does touch:
 
 - [x] LICENSE, README, `.gitignore` committed
 - [x] `main` lives at `cmd/gomux/` and `--version` works as described in Flows
-- [ ] CI workflow green on ubuntu and macOS, snapshot job green (runs after the first push; Status moves to Done then)
+- [x] CI workflow green on ubuntu and macOS, snapshot job green (run 43717595675)
 - [x] CLAUDE.md updated (§2, §3, §6.1, §9, §10, §11)
 - [x] `go test -race ./...` and `govulncheck ./...` pass
 - [x] Security checks for this item done (CLAUDE.md §13)
