@@ -1,0 +1,38 @@
+version: 2
+
+project_name: gomux
+
+builds:
+  - main: ./cmd/gomux
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - formats: [tar.gz]
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+nfpms:
+  - package_name: gomux
+    homepage: https://github.com/R7rainz/gomux
+    maintainer: R7rainz <114323738+R7rainz@users.noreply.github.com>
+    description: Terminal multiplexer and session manager for developers.
+    license: MIT
+    formats: [deb, rpm, apk, archlinux]
+    contents:
+      - src: LICENSE
+        dst: /usr/share/licenses/gomux/LICENSE
+      - src: LICENSE
+        dst: /usr/share/doc/gomux/copyright
+        packager: deb
+
+# Publishers (Homebrew tap, AUR) are added with the v0.1.0 release, work item 011.
