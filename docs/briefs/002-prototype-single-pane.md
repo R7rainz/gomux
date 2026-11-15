@@ -1,6 +1,6 @@
 # 002 — Prototype: a shell inside gomux
 
-Status: In progress
+Status: Done
 Phase: prototype spike, before Phase 1 (CLAUDE.md §9)
 Branch: `spike/002-single-pane`. Throwaway and **never merged**. Only the decisions it produces land on `main`.
 Issue: none
@@ -174,11 +174,11 @@ Also start `sh -c 'stty size'` through the PTY at a known size and check the out
 
 ## Done when
 
-- [ ] Scorecard filled in below for every candidate tried, plus input paths A and B on the winning emulator
-- [ ] Decisions recorded in CLAUDE.md: emulator and Bubble Tea version in §7, input path in §6.7, open decisions 1–3 removed from §11
-- [ ] Spike branch left unmerged
-- [ ] Brief and CLAUDE.md changes committed to `main`
-- [ ] Security rows checked for the chosen emulator (CLAUDE.md §13)
+- [x] Scorecard filled in below for every candidate tried, plus input paths A and B on the winning emulator. Path B was decided on evidence rather than hands-on; see Notes.
+- [x] Decisions recorded in CLAUDE.md: emulator and Bubble Tea version in §7, input path in §6.7, open decisions 1–3 removed from §11
+- [x] Spike branch left unmerged, then deleted
+- [x] Brief and CLAUDE.md changes committed to `main`
+- [x] Security rows checked for the chosen emulator (CLAUDE.md §13)
 
 ## Open questions
 
@@ -186,8 +186,69 @@ None left. Answered at approval: use btop instead of htop; keep the spike branch
 
 ## Scorecard
 
-<!-- Filled in during the spike. -->
+**Headless emulator fixtures** (`go test -race`, 20×5 screen):
+
+| Fixture | x/vt v0.1.0 | midterm v0.2.5 |
+|---|---|---|
+| truecolor foreground | ✅ | ✅ |
+| alternate screen restores main screen | ✅ | ✅ |
+| scroll region | ✅ | ✅ |
+| wide chars take two cells (`日`, `👍🏽`) | ✅ | ❌ splits the emoji's code points into separate cells; the next character is lost |
+| DA1 reply | ✅ | ✅ |
+| cursor position reply | ✅ | ✅ |
+| OSC 11 background reply | ✅ | ❌ no reply |
+| security: title report (`CSI 21 t`) not answered | ✅ | ✅ |
+| security: clipboard read (`OSC 52 ;?`) not answered | ✅ | ✅ |
+
+**Input path A on x/vt** (headless): every case matched.
+
+| Input | Encoded as |
+|---|---|
+| up arrow, normal mode | `ESC [A` |
+| up arrow, application cursor mode | `ESC OA` |
+| ctrl-c | `0x03` |
+| alt-b | `ESC b` |
+| paste, without bracketed mode | plain text |
+| paste, with bracketed mode | wrapped in `ESC [200~` … `ESC [201~` |
+| click, without mouse mode | nothing |
+| click, with SGR mouse mode | `ESC [<0;3;4M` |
+
+**PTY** (headless): `stty size` reports 24×80, then 30×100 after `Setsize`; the process was reaped cleanly.
+
+**Frame:** box plus status line is exactly 40×12, with wide characters, truecolor and an over-long line.
+
+**End to end** (the real program on a PTY, race-enabled build):
+- **Shells:** each started as a login shell with the real user config. sh ✅, dash ✅, bash ✅, zsh ✅, fish ✅ (no unanswered-query warning); nushell not installed.
+- **Behavior:** `TERM_PROGRAM=gomux` is visible inside; ctrl-q exits 0; the outer terminal is left on the main screen.
+- **Race detector:** 8 consecutive runs clean after the fix noted below.
+
+**Idle cost:** 0.2–0.4% CPU and about 17 MB RSS, with the shell at a prompt. The cost is the spike's 16 ms redraw tick.
+
+**Hands-on in Ghostty** (user, fish as the login shell, `-input tea`): every checklist row passed.
+- Prompts in fish, bash and zsh; ctrl-c.
+- vim and nvim; lazygit; btop; less.
+- Floods; Unicode; resize; keys; paste; truecolor.
+- Title and security rows; clean quit with an empty race log.
+
+**Input path B (raw):** not tried hands-on (see Notes).
+
+**Decision:**
+- **Emulator:** `x/vt`.
+- **UI library:** Bubble Tea v2 with Lipgloss v2.
+- **Input path:** A, key, paste and mouse events encoded by the emulator, sent as events rather than bytes.
 
 ## Notes after implementation
 
-<!-- Deviations from this brief, and why. -->
+**Path B was decided on evidence, not hands-on.** The outer terminal encodes keys according to its own modes, while the inner app's modes (application cursor keys, bracketed paste, mouse) live only in our emulator. So raw pass-through would need a translation layer that re-implements `x/vt`'s `SendKey`, `Paste` and `SendMouse`. Path A was correct in every headless case and every hands-on row.
+
+**`x/vt` v0.1.0 data race.** `Emulator.Close()` writes an unsynchronized `closed` flag that a concurrent `Read` checks, and `SafeEmulator` locks neither. The race-enabled end-to-end test caught it in roughly 1 run in 3. Workaround: close `emu.InputPipe()` instead. Recorded in CLAUDE.md §6.3. Worth reporting upstream to `charmbracelet/x`.
+
+**`x/vt` reply-under-lock caveat** (from reading the source). Replies are written into the pipe while the emulator lock is held, so a stuck app with a full input buffer would stall its pane's emulator. Recorded in CLAUDE.md §6.3 with the mitigation for the server.
+
+**Environment sanitizing confirmed.** It is now part of CLAUDE.md §6.6. `TERMINFO` was added to the dropped variables because Ghostty sets it to its own bundle.
+
+**Lipgloss v2's `Width`/`Height` include the border**, so the box is sized at inner + 2.
+
+**Any shell.** The user asked that gomux work for every shell, not only fish. The end-to-end test became a shell matrix, and the requirement is now CLAUDE.md §8, with a note on shared project files in §6.10.
+
+**Not built:** a `midterm` interactive adapter. It wasn't needed, because `x/vt` passed every row.
