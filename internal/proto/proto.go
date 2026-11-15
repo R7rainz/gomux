@@ -62,6 +62,23 @@ type HelloReply struct {
 	ServerVersion string `json:"server_version"`
 }
 
+// Requests after the handshake.
+const (
+	TypeSessionList = "session.list" // reply payload: SessionList
+	TypeServerKill  = "server.kill"  // empty reply, then the server shuts down
+	CodeUnknownType = "unknown_type"
+)
+
+// SessionList is the payload of a session.list reply.
+type SessionList struct {
+	Sessions []SessionInfo `json:"sessions"`
+}
+
+// SessionInfo describes one session; it gains fields as sessions do.
+type SessionInfo struct {
+	Name string `json:"name"`
+}
+
 // Write sends m as one frame, in a single w.Write call.
 func Write(w io.Writer, m Message) error {
 	var buf bytes.Buffer
