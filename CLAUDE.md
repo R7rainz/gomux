@@ -27,14 +27,13 @@ It works over SSH if installed on the remote host, but SSH use does not drive de
 
 ## 2. Current state
 
-Phase 0 (work item 001) and the prototype spike (work item 002) are done:
-- MIT `LICENSE` and `README.md`.
-- `cmd/gomux/main.go`, which only handles `--version`.
-- CI in `.github/workflows/ci.yml`.
-- `.goreleaser.yaml` (snapshot builds only, no publishers yet).
-- The spike chose the emulator (`x/vt`), the UI library (Bubble Tea v2) and the input path (§6.7, §7). Its code was thrown away.
+Phases 0 and 1 are done:
+- **Item 001:** MIT `LICENSE`, `README.md`, CI, and `.goreleaser.yaml` (snapshot builds only, no publishers yet).
+- **Item 002:** the prototype spike chose the emulator (`x/vt`), the UI library (Bubble Tea v2) and the input path (§6.7, §7). Its code was thrown away.
+- **Item 003:** `internal/proto`, the wire protocol (§6.8).
+- **Item 004:** the server on a private Unix socket (`internal/sock`, `internal/server`, `internal/client`, `internal/config` paths), plus the commands `gomux server`, `ls`, `kill-server` and `--version`.
 
-There is no multiplexer code and there are no dependencies yet. Next: Phase 1, starting with work item 003 (wire protocol).
+There are no sessions or panes yet. Next: Phase 2, starting with work item 005 (PTY and process lifecycle).
 
 ## 3. Commands
 
@@ -54,7 +53,7 @@ go run github.com/goreleaser/goreleaser/v2@v2.20.2 release --snapshot --clean  #
 grep -H '^Status:' docs/briefs/*.md             # status of every work item (§12)
 ```
 
-Keep a dev build away from an installed gomux: `GOMUX_SOCKET=/tmp/gomux-dev.sock bin/gomux ...`. Debug the server with `bin/gomux server --foreground --log-level debug` (logs go to stderr). Both are Phase 1 deliverables because a daemon is undebuggable without them.
+Keep a dev build away from an installed gomux: `GOMUX_SOCKET=/tmp/gomux-dev.sock bin/gomux ...`. Debug the server with `bin/gomux server --foreground --log-level debug` (logs go to stderr). Without `--foreground`, it logs to `~/.local/state/gomux/server.log`.
 
 ## 4. Working rules
 
@@ -85,8 +84,8 @@ gomux reload              reload config                                         
 gomux config check        validate config without starting anything
 gomux config default      print the default config
 gomux kill-server         stop the server and every session
-gomux server              hidden; runs the server (--foreground for dev)
-gomux --version           binary version + protocol version
+gomux server              hidden; runs the server (--foreground logs to stderr, --log-level)
+gomux --version           binary version + protocol version, e.g. "gomux v0.1.0 (protocol 1)"
 ```
 
 `attach` and `new` refuse to run inside a gomux pane (`$GOMUX` is set) unless `--force` is given, so nobody nests sessions by accident.
@@ -137,9 +136,24 @@ gomux --version           binary version + protocol version
 
 - One binary. `gomux server` is the server; every other subcommand is a client.
 - **Autostart:** only commands that create a session (`gomux`, `new`, `open`) start a server. `ls`, `attach`, `kill` and `kill-server` print "no server running" instead. If the socket is not accepting connections, the client removes a stale socket (connect fails with ECONNREFUSED), re-execs itself as `gomux server` with `SysProcAttr{Setsid: true}` and stdio on `/dev/null`, then waits for the socket. Go cannot fork, so re-exec is the way to daemonize.
-- **Socket path:** `$GOMUX_SOCKET`, else `$XDG_RUNTIME_DIR/gomux/default.sock`, else `$TMPDIR/gomux-$UID/default.sock` (macOS has no `XDG_RUNTIME_DIR`; `$TMPDIR` falls back to `/tmp`). The directory is 0700 and the socket 0600. The server checks the peer UID (`SO_PEERCRED` on Linux, `LOCAL_PEERCRED`/getpeereid on macOS) and rejects other users.
-- The server is the source of truth for runtime state, outlives its clients, and exits when the last session ends.
-- **Upgrades:** `brew upgrade` or `apt upgrade` does not restart a running server. The client sends its protocol version in the handshake. On a mismatch it prints which versions are involved and the two ways out: `gomux kill-server` (ends sessions) or keep using the old binary until done. It never talks across versions silently.
+- **Socket path** (`config.SocketPath`, item 004):
+  - `$GOMUX_SOCKET`, used as given;
+  - else `$XDG_RUNTIME_DIR/gomux/default.sock`;
+  - else `$TMPDIR/gomux-$UID/default.sock`. macOS has no `XDG_RUNTIME_DIR`, and `$TMPDIR` falls back to `/tmp`.
+  - Relative XDG paths are ignored, as the XDG spec requires. A path longer than `sun_path` allows (103 usable bytes on macOS, 107 on Linux) is an error that suggests `GOMUX_SOCKET`.
+- **Socket safety** (`internal/sock`):
+  - **The directory.** gomux creates its own directory with mode 0700. An existing one must be a real directory (`Lstat`, so no symlinks), owned by us, with no group or other access; otherwise gomux **refuses** with the fix rather than repairing it. `$GOMUX_SOCKET`'s directory is the user's choice and isn't checked.
+  - **The socket.** It is 0600.
+  - **What's already at the path:**
+    - a live server → "already running";
+    - a socket that refuses connections → removed as stale;
+    - anything that isn't a socket → refused.
+  - **Peer check, both directions:** the server rejects clients from another UID, and the client refuses a server run by another UID. Both use kernel peer credentials: `SO_PEERCRED` on Linux, `LOCAL_PEERCRED` and `LOCAL_PEERPID` on macOS, via `golang.org/x/sys/unix`.
+- The server is the source of truth for runtime state, outlives its clients, and exits when the last session ends (once sessions exist; until then it runs until killed).
+- **Upgrades:**
+  - `brew upgrade` or `apt upgrade` does not restart a running server. It never talks across versions silently.
+  - On a protocol-version mismatch, every command explains it and points to `gomux kill-server`.
+  - `kill-server` can't use the protocol with such a server, so it sends SIGTERM to the server's PID instead (the server's graceful shutdown). The PID is reported by the kernel at connect time, after the same-UID check, and PIDs ≤ 1 are refused.
 
 ### 6.2 Packages
 
@@ -147,7 +161,8 @@ Create a package only when its phase needs it.
 
 ```
 cmd/gomux/        main: subcommand dispatch with stdlib flag; no logic
-internal/proto/   envelope, message types, length-prefixed framing, protocol version
+internal/proto/   envelope, message types, length-prefixed framing, protocol version. Pure, no OS calls
+internal/sock/    Unix socket transport: private-directory and stale-socket checks, listen, dial, peer credentials
 internal/server/  listener, client connections, event loop, Session/Window/Pane model, command registry
 internal/layout/  layout tree: split, close, resize, navigate, compute rects. Pure, no I/O
 internal/term/    PTY, process spawn/lifecycle, VT emulator wrapper (one per pane)
@@ -156,7 +171,7 @@ internal/config/  defaults, XDG paths, TOML loading, validation, keybinding pars
 internal/plugin/  built-in plugin interface and manager; one subpackage per plugin
 ```
 
-Dependencies point one way: `client → proto, config`; `server → proto, layout, term, config, plugin`. `client` never imports `server` or `term`, and `layout` imports nothing internal. A cycle means the design is wrong. Don't paper over it with an interfaces package.
+Dependencies point one way: `client → proto, sock, config`; `server → proto, sock, layout, term, config, plugin`; `cmd/gomux` wires them together and resolves paths. `client` never imports `server` or `term`, and `layout` imports nothing internal. A cycle means the design is wrong. Don't paper over it with an interfaces package.
 
 ### 6.3 Concurrency
 
@@ -233,7 +248,10 @@ Implemented in item 003; `internal/proto/proto.go` is the reference.
   - The server replies `hello` with `{"server_version": …}`, or with `error{code:"version_mismatch"}` and closes the connection.
   - A first frame other than `hello` closes the connection.
   - Terminal size, TERM and environment are not in `hello`; they travel in the requests that need them (§6.6).
-- **Compatibility:** unknown fields are ignored, so optional fields can be added within a version. Anything an older peer would misread bumps `proto.Version`.
+- **Compatibility:**
+  - Unknown fields are ignored, so optional fields can be added within a version. Anything an older peer would misread bumps `proto.Version`.
+  - **The frame format and the `hello` exchange must never change.** They are how any two gomux versions detect that they don't match.
+  - After the handshake, a message carrying another `version` closes the connection.
 - **Encoding:** JSON is written without HTML escaping, so `<`, `>` and `&` aren't inflated into 6-byte escapes.
 - Input travels as events (§6.7): key events, paste text and mouse events, not raw bytes.
 - `shortcut: screen updates are JSON too; if profiling shows encoding or bandwidth cost, add a binary frame type behind the same length prefix.`
@@ -348,6 +366,7 @@ type Plugin interface {
 | PTY | `github.com/creack/pty` v1.1.24 | De facto standard, pure Go, Linux/macOS/BSD. No Windows, which matches the non-goal. Its `v2` tag (2023) never became a release; v1 is the maintained line. |
 | VT emulation | `github.com/charmbracelet/x/vt` v0.1.0 | **Chosen by the prototype spike (item 002).** MIT, maintained by Charm, and shares its cell model (`ultraviolet`, `x/ansi`) with Bubble Tea v2.<br>• Passed every headless fixture: truecolor, alternate screen, scroll regions, wide characters and emoji, replies to DA, cursor-position and OSC 11 queries.<br>• Passed both security fixtures: it ignores title reports and clipboard reads.<br>• Encodes keys, paste and mouse by the app's modes.<br>• Worked with sh, dash, bash, zsh, fish, vim, nvim, lazygit, btop and less.<br>Caveats are in §6.3. Rejected: `vito/midterm` (breaks on emoji, doesn't answer OSC 11, has no key encoder, not goroutine-safe) and `hinshun/vt10x` (unmaintained since 2022). |
 | Client UI | `charm.land/bubbletea/v2` v2.1.1 + `charm.land/lipgloss/v2` v2.1.1 | **v2 chosen by the spike;** v1 has had no release since September 2025. Its `View` is declarative (alternate screen, cursor position and shape, mouse mode), and its key events convert directly into the emulator's. Import from `charm.land/...`. Lipgloss v2's `Width`/`Height` include the border. Bubble Tea is for the interface only, not PTYs or emulation. |
+| Peer credentials | `golang.org/x/sys` v0.50.0 | Added in item 004. The Go team's own pure-Go extension of `syscall` (no cgo), already pulled in indirectly by Bubble Tea. The standard library has no peer-credential call on macOS. |
 | Config | `github.com/BurntSushi/toml` | `MetaData.Undecoded()` provides unknown-key warnings. |
 | System stats | `github.com/shirou/gopsutil` | Cross-platform without cgo. Imported only by the sysmon plugin. |
 | WASM plugins | `github.com/tetratelabs/wazero` | Pure Go, no cgo. Phase 8 only. |
@@ -359,7 +378,7 @@ type Plugin interface {
 
 - **Platforms:**
   - Tier 1, tested in CI: Linux and macOS on amd64 and arm64.
-  - FreeBSD probably builds (creack/pty supports it) but is not promised.
+  - FreeBSD doesn't build yet: `internal/sock` has peer-credential code only for Linux and macOS. It would need a `peer_freebsd.go`, and isn't promised.
   - Windows is a non-goal.
 - **Build:**
   - Every release binary is built with `CGO_ENABLED=0`, which gives static binaries and trivial cross-compiling. Every dependency must stay cgo-free.
@@ -391,12 +410,13 @@ This is the spec's phase order with four deliberate changes, marked ⚠. Each ph
   - One process: a shell in a PTY, drawn through `x/vt` inside a Bubble Tea box.
   - Chose `x/vt`, Bubble Tea v2 and event-based input (§6.7, §7), and found the `x/vt` caveats in §6.3.
   - ⚠ Moved ahead of Phase 1 from the spec's Phase 2. These are the biggest unknowns, and the server is built on their answers.
-1. **Foundation.**
-   - Config defaults and paths; proto framing and handshake.
+1. **Foundation.** ✓ Done (items 003 and 004).
+   - Config paths; proto framing and handshake.
    - Socket permissions, peer check, stale-socket handling.
    - `server --foreground`, `kill-server`, `ls`.
    - The server is started by hand in this phase. Autostart comes with the first session (`gomux new`, item 007), because only session-creating commands start a server (§6.1).
-   - Exit: `ls` round-trips ("no sessions"); `kill-server` stops the server and removes the socket; `ls` with no server prints "no server running"; a version mismatch fails cleanly.
+   - Config *defaults* moved to the first item that adds a config key: there was nothing to default yet.
+   - Exit, met: `ls` round-trips ("no sessions"); `kill-server` stops the server and removes the socket; `ls` with no server prints "no server running"; a version mismatch fails cleanly, and `kill-server` stops a mismatched server.
 2. **Terminal engine.**
    - Built on `x/vt` with event-based input (§6.7, §7).
    - PTY spawn, I/O, resize, exit, kill. A single pane rendered from emulator snapshots and updates.
@@ -531,7 +551,7 @@ Security is checked at fixed points, not when someone remembers.
 | CI | Every push: `govulncheck`, `go vet`, `staticcheck`, `go test -race`. Weekly: a scheduled `govulncheck`, so new CVEs in dependencies show up without a push. |
 
 **Trust boundaries in gomux** (what the checks look at):
-- **The socket.** Other local users are kept out by the peer-UID check and the 0600/0700 permissions. Malformed or oversized frames hit the size limit and the fuzzed decoder, and bad input never panics the server.
+- **The socket.** Other local users are kept out by the 0600/0700 permissions, the refusal of unsafe directories, and the peer-UID check in both directions (§6.1). Malformed or oversized frames hit the size limit and the fuzzed decoder, and bad input never panics the server. Server-supplied text is stripped of control characters before the client prints it (`client.Printable`).
 - **Pane output is untrusted.** Any program, or `cat` of a downloaded file, can emit escape sequences, and they must never inject input into the shell.
   - Don't implement reports that echo attacker-controlled text back to the PTY (window and icon title reports).
   - Allow OSC 52 clipboard *writes* only, never clipboard reads.
