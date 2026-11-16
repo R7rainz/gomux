@@ -33,7 +33,11 @@ Phases 0 and 1 are done:
 - **Item 003:** `internal/proto`, the wire protocol (§6.8).
 - **Item 004:** the server on a private Unix socket (`internal/sock`, `internal/server`, `internal/client`, `internal/config` paths), plus the commands `gomux server`, `ls`, `kill-server` and `--version`.
 
-There are no sessions or panes yet. Next: Phase 2, starting with work item 006 (PTY and process lifecycle). Item 005 added a gofmt check to CI.
+Phase 2 has started:
+- **Item 005** added a gofmt check to CI.
+- **Item 006** added `internal/term`, which runs a program on a PTY with input, output, resize, exit and kill.
+
+There are no sessions or panes yet. Next: work item 007 (server-side screen state: `x/vt` attached to a `Term`, plus the installed-shell test matrix).
 
 ## 3. Commands
 
@@ -177,7 +181,10 @@ Dependencies point one way: `client → proto, sock, config`; `server → proto,
 ### 6.3 Concurrency
 
 - **One event-loop goroutine** in the server owns every session, window, pane and layout. Client connections and panes talk to it over channels, and it never blocks on I/O. This replaces lock-per-struct designs.
-- **Each pane** has a reader goroutine that continuously drains the PTY master into the pane's emulator (guarded by its own mutex), marks the pane dirty and notifies the loop. It must never stall: if nobody reads the PTY, the program in the pane blocks on write. A second goroutine waits on `cmd.Wait()`, reaps the process and reports its exit status.
+- **Each pane's `term.Term`** (item 006) owns three goroutines:
+  - **reader:** continuously drains the PTY master into `Spec.Output` (the pane's emulator, guarded by its own mutex), which marks the pane dirty and notifies the loop. It must never stall: if nobody reads the PTY, the program in the pane blocks on write. It keeps draining even when `Output` fails.
+  - **writer:** writes queued input to the master. `Term.Write` never blocks the caller and fails once 1 MiB is pending, so a program that stops reading its input stalls only itself.
+  - **waiter:** `cmd.Wait()` reaps the process, then it waits up to 200 ms for the last output, closes the master and closes `Done()`. `ExitState()` gives the exit code or signal.
 - **Each pane's emulator reply pipe** (`x/vt`): query replies and encoded input both come out of `emu.Read`, an `io.Pipe` that blocks the emulator until someone reads. One goroutine per pane drains it into the PTY. Two caveats found in the spike:
   - Replies are written while the emulator's lock is held. If the app stops reading its input and the PTY's input buffer fills, the drain blocks, and with it the pane's emulator writes and screen reads. Drain into a buffer and write to the PTY from a separate goroutine, so a stuck app can stall only its own input.
   - In `x/vt` v0.1.0, `Close()` races with a concurrent `Read` (an unsynchronized flag, found with the race detector). End the drain by closing `emu.InputPipe()` instead, until this is fixed upstream.
@@ -215,9 +222,16 @@ IDs are monotonically increasing integers per server. They are never reused and 
 - **Output:** PTY bytes go into the emulator (screen, alternate screen, cursor, modes, scrollback ring). Output is never treated as plain text.
 - **Query replies:** the emulator's answers to device attributes, cursor-position reports and OSC 10/11 color queries are written back to the PTY. Without them, apps such as nvim and fish stall or misbehave.
 - **Resize:** client SIGWINCH → `resize` message → server recomputes the layout → `pty.Setsize` per pane (the kernel delivers SIGWINCH to the pane's foreground process group) → emulator resize. With several clients on one session, the most recently active client's size wins.
-- **Pane exit:** when the process exits, the pane closes, along with its window or session if it was the last one.
-- **Killing a pane:** close the PTY master (SIGHUP to the session), wait a short grace period, then SIGKILL the process group.
-- **Server shutdown** (`kill-server`, SIGTERM, SIGINT): stop accepting connections, hang up every pane, wait out the grace period, SIGKILL leftovers, remove the socket and exit. Processes do not survive server shutdown; this must be stated in the README. If the server crashes, the kernel closes the PTY masters and the result is the same. The server ignores SIGHUP.
+- **Pane exit:** when the pane's *main* program exits, the pane closes, along with its window or session if it was the last one.
+  - Its last output is drained for up to 200 ms. The pane doesn't wait for background jobs that still hold the PTY.
+  - Those jobs get whatever the shell does on exit, the same as closing a terminal window (zsh and fish hang them up; bash only with `huponexit`).
+  - Programs started with `nohup` or `setsid` keep running, as in tmux.
+- **Killing a pane** (`Term.Kill`, item 006):
+  - `kill(-pgid, SIGHUP)`, which is what closing a terminal window sends; interactive shells pass it on to their jobs.
+  - After 2 s, `kill(-pgid, SIGKILL)`, then close the master.
+  - The program's PID is its process-group ID (`pty.StartWithSize` uses `setsid`). A reaped PID is never signalled, and PIDs ≤ 1 are refused.
+  - **Why not just close the master:** on macOS `creack/pty` opens it as a blocking descriptor, and Go postpones the real `close()` while the reader goroutine is blocked in `read()`. Item 006 measured it: closing the master alone didn't hang up `sleep` within 2 s.
+- **Server shutdown** (`kill-server`, SIGTERM, SIGINT): stop accepting connections, `Kill` every pane in parallel (SIGHUP, then SIGKILL after the grace period), remove the socket and exit. Processes do not survive server shutdown; this must be stated in the README. If the server crashes, the kernel closes the PTY masters and the result is the same. The server ignores SIGHUP.
 - **Restoring the client terminal:** on exit, on panic and on server EOF, the client leaves the alternate screen, shows the cursor, turns off mouse, bracketed-paste and focus reporting, and restores cooked mode. Bubble Tea handles normal exit; the panic and EOF paths need explicit handling.
 
 ### 6.7 Rendering and input
@@ -364,7 +378,7 @@ type Plugin interface {
 
 | Need | Choice | Why / notes |
 |---|---|---|
-| PTY | `github.com/creack/pty` v1.1.24 | De facto standard, pure Go, Linux/macOS/BSD. No Windows, which matches the non-goal. Its `v2` tag (2023) never became a release; v1 is the maintained line. |
+| PTY | `github.com/creack/pty` v1.1.24 | De facto standard, pure Go, Linux/macOS/BSD. No Windows, which matches the non-goal. Its `v2` tag (2023) never became a release; v1 is the maintained line.<br>The master is opened per OS: through Go's poller on Linux (closing it wakes a blocked reader), but as a blocking descriptor on macOS (closing it is postponed while a read is pending). That's why panes are killed by process-group signals (§6.6). |
 | VT emulation | `github.com/charmbracelet/x/vt` v0.1.0 | **Chosen by the prototype spike (item 002).** MIT, maintained by Charm, and shares its cell model (`ultraviolet`, `x/ansi`) with Bubble Tea v2.<br>• Passed every headless fixture: truecolor, alternate screen, scroll regions, wide characters and emoji, replies to DA, cursor-position and OSC 11 queries.<br>• Passed both security fixtures: it ignores title reports and clipboard reads.<br>• Encodes keys, paste and mouse by the app's modes.<br>• Worked with sh, dash, bash, zsh, fish, vim, nvim, lazygit, btop and less.<br>Caveats are in §6.3. Rejected: `vito/midterm` (breaks on emoji, doesn't answer OSC 11, has no key encoder, not goroutine-safe) and `hinshun/vt10x` (unmaintained since 2022). |
 | Client UI | `charm.land/bubbletea/v2` v2.1.1 + `charm.land/lipgloss/v2` v2.1.1 | **v2 chosen by the spike;** v1 has had no release since September 2025. Its `View` is declarative (alternate screen, cursor position and shape, mouse mode), and its key events convert directly into the emulator's. Import from `charm.land/...`. Lipgloss v2's `Width`/`Height` include the border. Bubble Tea is for the interface only, not PTYs or emulation. |
 | Peer credentials | `golang.org/x/sys` v0.50.0 | Added in item 004. The Go team's own pure-Go extension of `syscall` (no cgo), already pulled in indirectly by Bubble Tea. The standard library has no peer-credential call on macOS. |
@@ -420,7 +434,8 @@ This is the spec's phase order with four deliberate changes, marked ⚠. Each ph
    - Exit, met: `ls` round-trips ("no sessions"); `kill-server` stops the server and removes the socket; `ls` with no server prints "no server running"; a version mismatch fails cleanly, and `kill-server` stops a mismatched server.
 2. **Terminal engine.**
    - Built on `x/vt` with event-based input (§6.7, §7).
-   - PTY spawn, I/O, resize, exit, kill. A single pane rendered from emulator snapshots and updates.
+   - ✓ PTY spawn, I/O, resize, exit, kill: item 006 (`internal/term`).
+   - A single pane rendered from emulator snapshots and updates: item 007 (screen state), then item 008 (`gomux new`).
    - End-to-end tests run the shell matrix (§8) in CI.
    - Exit: nvim, btop and fish are usable in one pane, resize works, and no zombie processes are left.
    - ⚠ VT emulation moves here from the spec's Phase 5. Splits and reattach both need server-side screen state, so they cannot be built on raw byte forwarding. Phase 5 hardens the emulator.
