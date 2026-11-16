@@ -33,19 +33,20 @@ Phases 0 and 1 are done:
 - **Item 003:** `internal/proto`, the wire protocol (§6.8).
 - **Item 004:** the server on a private Unix socket (`internal/sock`, `internal/server`, `internal/client`, `internal/config` paths), plus the commands `gomux server`, `ls`, `kill-server` and `--version`.
 
-There are no sessions or panes yet. Next: Phase 2, starting with work item 005 (PTY and process lifecycle).
+There are no sessions or panes yet. Next: Phase 2, starting with work item 006 (PTY and process lifecycle). Item 005 added a gofmt check to CI.
 
 ## 3. Commands
 
 Commands that name packages which don't exist yet become useful as later phases land. Tool versions match the pins in `.github/workflows/ci.yml`; keep them in sync.
 
 ```sh
-go run ./cmd/gomux                              # client; autostarts the server (from item 007)
+go run ./cmd/gomux                              # client; autostarts the server (from item 008)
 go build -o bin/gomux ./cmd/gomux               # plain `go build ./...` drops a ./gomux binary (git-ignored)
 go test ./...
 go test -race ./...                             # required before every change lands; the server is concurrent
 go test ./internal/layout -run '^TestSplit$' -v # single test
 go test ./internal/proto -run '^$' -fuzz FuzzRead -fuzztime 30s
+gofmt -l .                                      # must print nothing; CI fails otherwise
 go vet ./...
 go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
 go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...   # known-vulnerability scan of code + deps (§13)
@@ -404,7 +405,7 @@ This is the spec's phase order with four deliberate changes, marked ⚠. Each ph
 0. **Repo hygiene.** ✓ Done (item 001).
    - LICENSE, README.
    - `main` moved to `cmd/gomux/`, so `go install …/cmd/gomux@latest` names the binary `gomux`; with `main` in `cmd/` it would be named `cmd`.
-   - CI on ubuntu and macOS: vet, staticcheck, `test -race`, `govulncheck`, plus a weekly scheduled run.
+   - CI on ubuntu and macOS: gofmt (added in item 005), vet, staticcheck, `test -race`, `govulncheck`, plus a weekly scheduled run.
    - `.goreleaser.yaml` with a snapshot build in CI, so packaging never rots.
 - **Prototype spike.** ✓ Done (item 002; throwaway branch, deleted).
   - One process: a shell in a PTY, drawn through `x/vt` inside a Bubble Tea box.
@@ -414,7 +415,7 @@ This is the spec's phase order with four deliberate changes, marked ⚠. Each ph
    - Config paths; proto framing and handshake.
    - Socket permissions, peer check, stale-socket handling.
    - `server --foreground`, `kill-server`, `ls`.
-   - The server is started by hand in this phase. Autostart comes with the first session (`gomux new`, item 007), because only session-creating commands start a server (§6.1).
+   - The server is started by hand in this phase. Autostart comes with the first session (`gomux new`, item 008), because only session-creating commands start a server (§6.1).
    - Config *defaults* moved to the first item that adds a config key: there was nothing to default yet.
    - Exit, met: `ls` round-trips ("no sessions"); `kill-server` stops the server and removes the socket; `ls` with no server prints "no server running"; a version mismatch fails cleanly, and `kill-server` stops a mismatched server.
 2. **Terminal engine.**
@@ -548,7 +549,7 @@ Security is checked at fixed points, not when someone remembers.
 | Every PR | `govulncheck ./...` is clean and the PR body has a Security line. A change that touches a trust boundary also gets a `/security-review` pass before the PR opens. |
 | End of each roadmap phase | `/security-review` over the phase's changes. Fuzz the protocol decoder and the config/workspace parsers for longer (`-fuzztime 5m`). Review new dependencies (maintenance, license, what they pull in). Record findings in the phase's last brief. |
 | Before every release | `govulncheck`, a dependency review, and a permission check: socket 0600, its directory 0700, state files 0600. Confirm the logs contain no pane content or environment values. |
-| CI | Every push: `govulncheck`, `go vet`, `staticcheck`, `go test -race`. Weekly: a scheduled `govulncheck`, so new CVEs in dependencies show up without a push. |
+| CI | Every push: `gofmt`, `govulncheck`, `go vet`, `staticcheck`, `go test -race`. Weekly: a scheduled `govulncheck`, so new CVEs in dependencies show up without a push. |
 
 **Trust boundaries in gomux** (what the checks look at):
 - **The socket.** Other local users are kept out by the 0600/0700 permissions, the refusal of unsafe directories, and the peer-UID check in both directions (§6.1). Malformed or oversized frames hit the size limit and the fuzzed decoder, and bad input never panics the server. Server-supplied text is stripped of control characters before the client prints it (`client.Printable`).
