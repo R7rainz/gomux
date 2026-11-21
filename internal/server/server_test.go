@@ -15,6 +15,7 @@ import (
 
 	"github.com/R7rainz/gomux/internal/proto"
 	"github.com/R7rainz/gomux/internal/sock"
+	"github.com/R7rainz/gomux/internal/testutil"
 )
 
 type running struct {
@@ -23,16 +24,10 @@ type running struct {
 	done   chan error
 }
 
-// start runs a server on a short /tmp socket path (macOS limits socket paths
-// to 104 bytes, too short for t.TempDir()).
+// start runs a server on a socket in testutil.SocketDir.
 func start(t *testing.T) *running {
 	t.Helper()
-	dir, err := os.MkdirTemp("/tmp", "gmx")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
-	path := filepath.Join(dir, "s.sock")
+	path := filepath.Join(testutil.SocketDir(t), "s.sock")
 	ln, err := sock.Listen(path, false)
 	if err != nil {
 		t.Fatal(err)
