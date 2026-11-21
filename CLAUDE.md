@@ -37,14 +37,16 @@ Phase 2 has started:
 - **Item 005** added a gofmt check to CI.
 - **Item 006** added `internal/term`, which runs a program on a PTY with input, output, resize, exit and kill.
 
-There are no sessions or panes yet. Next: work item 007 (server-side screen state: `x/vt` attached to a `Term`, plus the installed-shell test matrix).
+- **Item 007** organized the tests: shared helpers in `internal/testutil`, and the conventions in §15.
+
+There are no sessions or panes yet. Next: the screen-state item (`x/vt` attached to a `Term`, plus the installed-shell test matrix).
 
 ## 3. Commands
 
 Commands that name packages which don't exist yet become useful as later phases land. Tool versions match the pins in `.github/workflows/ci.yml`; keep them in sync.
 
 ```sh
-go run ./cmd/gomux                              # client; autostarts the server (from item 008)
+go run ./cmd/gomux                              # client; autostarts the server (from the `gomux new` item)
 go build -o bin/gomux ./cmd/gomux               # plain `go build ./...` drops a ./gomux binary (git-ignored)
 go test ./...
 go test -race ./...                             # required before every change lands; the server is concurrent
@@ -174,6 +176,7 @@ internal/term/    PTY, process spawn/lifecycle, VT emulator wrapper (one per pan
 internal/client/  Bubble Tea program: input, keybindings, composing panes and chrome, palette UI
 internal/config/  defaults, XDG paths, TOML loading, validation, keybinding parsing
 internal/plugin/  built-in plugin interface and manager; one subpackage per plugin
+internal/testutil/ helpers shared by tests only; never imported by production code (§15)
 ```
 
 Dependencies point one way: `client → proto, sock, config`; `server → proto, sock, layout, term, config, plugin`; `cmd/gomux` wires them together and resolves paths. `client` never imports `server` or `term`, and `layout` imports nothing internal. A cycle means the design is wrong. Don't paper over it with an interfaces package.
@@ -436,13 +439,13 @@ This is the spec's phase order with four deliberate changes, marked ⚠. Each ph
    - Config paths; proto framing and handshake.
    - Socket permissions, peer check, stale-socket handling.
    - `server --foreground`, `kill-server`, `ls`.
-   - The server is started by hand in this phase. Autostart comes with the first session (`gomux new`, item 008), because only session-creating commands start a server (§6.1).
+   - The server is started by hand in this phase. Autostart comes with the first session (the `gomux new` item), because only session-creating commands start a server (§6.1).
    - Config *defaults* moved to the first item that adds a config key: there was nothing to default yet.
    - Exit, met: `ls` round-trips ("no sessions"); `kill-server` stops the server and removes the socket; `ls` with no server prints "no server running"; a version mismatch fails cleanly, and `kill-server` stops a mismatched server.
 2. **Terminal engine.**
    - Built on `x/vt` with event-based input (§6.7, §7).
    - ✓ PTY spawn, I/O, resize, exit, kill: item 006 (`internal/term`).
-   - A single pane rendered from emulator snapshots and updates: item 007 (screen state), then item 008 (`gomux new`).
+   - A single pane rendered from emulator snapshots and updates: the screen-state item, then the `gomux new` item.
    - End-to-end tests run the shell matrix (§8) in CI.
    - Exit: nvim, btop and fish are usable in one pane, resize works, and no zombie processes are left.
    - ⚠ VT emulation moves here from the spec's Phase 5. Splits and reattach both need server-side screen state, so they cannot be built on raw byte forwarding. Phase 5 hardens the emulator.
@@ -538,6 +541,7 @@ Every feature, fix or chore is a **work item** with a number and a title. Each o
 - Brief: `docs/briefs/NNN-kebab-title.md`, copied from `docs/briefs/TEMPLATE.md`.
 - Branch: `<type>/NNN-kebab-title`, e.g. `feat/007-layout-tree`.
 - One work item = one branch = one PR. A roadmap phase splits into several work items, each small enough to review in one sitting.
+- **Numbers are given when the brief is written.** Planned work is referred to by name ("the screen-state item"), so inserting an item never renumbers the plan.
 - **Where the brief is committed:** for feature work (items that get a PR), the approved brief is the PR's first commit, so the plan and the code are reviewed together. Setup and docs items commit their brief straight to `main`.
 
 **Status** is the `Status:` line at the top of each brief: `Draft → Approved → In progress → Done` (or `Dropped`). List all of them with `grep -H '^Status:' docs/briefs/*.md`.
@@ -616,3 +620,30 @@ Security is checked at fixed points, not when someone remembers.
   - **Testing:** how it was verified (commands run, apps tried manually).
   - **Security:** boundaries touched and how they were checked, or `none` with a reason.
   - **Notes:** only if needed (breaking change, follow-up, decision recorded in CLAUDE.md).
+
+## 15. Testing
+
+Set in item 007. Every change ships with tests organized this way.
+
+**Where tests live:**
+
+| What | Where |
+|---|---|
+| Unit tests | Next to the code, in the same package (`foo.go` → `foo_test.go`), so they can reach unexported names |
+| End-to-end tests | Only in `cmd/gomux`, against the real binary built with `-race` (`setup` in `main_test.go`) |
+| Fuzz tests | `fuzz_test.go` in the package, with seeds added through `f.Add` (CI replays them) |
+| Shared helpers | Only `internal/testutil`. Production code never imports it (`TestNotLinkedIntoGomux`). Don't copy a helper into a second package: move it there |
+
+**`internal/testutil`:**
+- `SocketDir(t)`: a short, private (0700), auto-removed directory under `/tmp` for Unix sockets. macOS limits socket paths to 104 bytes, and `t.TempDir()` is longer.
+- `Eventually(t, timeout, what, cond)`: polls until `cond` holds. Call it from the test's own goroutine.
+- `Buffer`: a goroutine-safe buffer for output written by one goroutine while the test reads it.
+
+**How tests are written:**
+- **Name a test after the behavior it proves** (`TestKillSweepsGroupAfterMainDies`), not after the function under test.
+- **Go table-driven** once there are three or more similar cases.
+- **No fixed sleeps for synchronization.** Wait with `testutil.Eventually` or for a marker the program prints (`echo ready`). The one allowed sleep is an **observation window**: when a test must prove something does *not* happen (no output after `Done`), it watches for a fixed time and says so in a comment.
+- **Programs started by tests are `/bin/sh` scripts**, deterministic on every machine. The exception is a test whose point is a real shell, such as the shell matrix (§8).
+- **Every bug fix comes with a regression test that is shown to fail without the fix**, by running it against the old code before committing.
+- **Concurrency code** (anything with goroutines, signals or sockets) also runs with `go test -race -count=5` before its PR.
+- **When a refactor touches tests,** compare the list of passing test names before and after; no test may disappear.
