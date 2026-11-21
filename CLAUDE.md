@@ -645,5 +645,6 @@ Set in item 007. Every change ships with tests organized this way.
 - **No fixed sleeps for synchronization.** Wait with `testutil.Eventually` or for a marker the program prints (`echo ready`). The one allowed sleep is an **observation window**: when a test must prove something does *not* happen (no output after `Done`), it watches for a fixed time and says so in a comment.
 - **Programs started by tests are `/bin/sh` scripts**, deterministic on every machine. The exception is a test whose point is a real shell, such as the shell matrix (§8).
 - **Every bug fix comes with a regression test that is shown to fail without the fix**, by running it against the old code before committing.
-- **Concurrency code** (anything with goroutines, signals or sockets) also runs with `go test -race -count=5` before its PR.
+- **Don't signal readiness through output the code under test may drop.** For example, a `Term` discards output after `Done`. Use a flag file the program creates (`: > "$flag"`) and wait for it with `testutil.Eventually` (item 007 fixed a flake caused by exactly this).
+- **Concurrency code** (anything with goroutines, signals or sockets) also runs with `go test -race -count=5` before its PR, and **under CPU load** (`for i in $(seq 12); do (yes > /dev/null &); done`, then `pkill -x yes`). CI runners are slower than a laptop, and load is how their races show up locally.
 - **When a refactor touches tests,** compare the list of passing test names before and after; no test may disappear.
