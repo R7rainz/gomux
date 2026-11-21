@@ -231,7 +231,8 @@ IDs are monotonically increasing integers per server. They are never reused and 
   - After 2 s, `kill(-pgid, SIGKILL)`, then close the master.
   - The program's PID is its process-group ID (`pty.StartWithSize` uses `setsid`). A reaped PID is never signalled, and PIDs ≤ 1 are refused.
   - **Why not just close the master:** on macOS `creack/pty` opens it as a blocking descriptor, and Go postpones the real `close()` while the reader goroutine is blocked in `read()`. Item 006 measured it: closing the master alone didn't hang up `sleep` within 2 s.
-- **Server shutdown** (`kill-server`, SIGTERM, SIGINT): stop accepting connections, `Kill` every pane in parallel (SIGHUP, then SIGKILL after the grace period), remove the socket and exit. Processes do not survive server shutdown; this must be stated in the README. If the server crashes, the kernel closes the PTY masters and the result is the same. The server ignores SIGHUP.
+- **Server shutdown** (`kill-server`, SIGTERM, SIGINT): stop accepting connections, `Kill` every pane in parallel (SIGHUP, then SIGKILL after the grace period), remove the socket and exit. Processes do not survive server shutdown; this must be stated in the README. If the server crashes, the kernel closes the PTY masters and the result is the same.
+  - The server survives SIGHUP by catching and discarding it (`signal.Notify`), **not** `signal.Ignore`. An ignored signal stays ignored in every program the server starts, which would make panes deaf to `Kill`'s hang-up. Found by item 006's security review; `TestHangupsHandledNotIgnored` guards it.
 - **Restoring the client terminal:** on exit, on panic and on server EOF, the client leaves the alternate screen, shows the cursor, turns off mouse, bracketed-paste and focus reporting, and restores cooked mode. Bubble Tea handles normal exit; the panic and EOF paths need explicit handling.
 
 ### 6.7 Rendering and input
