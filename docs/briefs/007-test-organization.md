@@ -1,6 +1,6 @@
 # 007 — Test organization and shared helpers
 
-Status: In progress
+Status: Done
 Phase: 2, housekeeping before the screen-state item (CLAUDE.md §9)
 Branch: `test/007-test-organization`. It changes code (tests), so it gets a PR (CLAUDE.md §14); this brief is the PR's first commit.
 Issue: none
@@ -83,11 +83,11 @@ None. The item changes tests and documentation only, and touches no runtime trus
 
 ## Done when
 
-- [ ] `internal/testutil` with tests; the four duplicated socket-dir helpers, the polling loops and the term buffer are replaced
-- [ ] `TestKillForcesStubbornGroup` waits for a `ready` marker instead of sleeping
-- [ ] Same tests pass as before (names compared), plus the new ones
-- [ ] CLAUDE.md: "Testing" section, planned items referred to by name
-- [ ] Code review of the diff clean; CI green; merged with Rebase and merge
+- [x] `internal/testutil` with tests; the four duplicated socket-dir helpers, the polling loops and the term buffer are replaced
+- [x] `TestKillForcesStubbornGroup` waits for a `ready` marker instead of sleeping
+- [x] Same tests pass as before (names compared), plus the new ones
+- [x] CLAUDE.md: "Testing" section, planned items referred to by name
+- [ ] Code review of the diff clean; CI green; merged with Rebase and merge (waiting on the user's explicit approval, see Notes)
 
 ## Open questions
 
@@ -95,4 +95,22 @@ None.
 
 ## Notes after implementation
 
-<!-- Deviations from this brief, and why. -->
+**No test lost.**
+- The passing-test names were recorded before the refactor: 76, including subtests.
+- After it: 81 = the same 76 plus 5 new `testutil` tests (4 tests and 1 subtest). `comm` showed no name disappearing, and nothing fails or skips.
+
+**The ready marker.** The script prints `trapped` rather than `ready`, which says what it marks. The idea is the same as in the brief.
+
+**Observation windows.** Two fixed sleeps remain, both labelled in comments:
+- `TestNoOutputAfterDone` (300 ms) and `TestHangupsHandledNotIgnored` (50 ms) each prove that something does *not* happen, so they must watch for a while.
+- CLAUDE.md §15 spells out this exception.
+
+**Code review (`/code-review high`), 4 findings, all handled:**
+1. **A nil-dereference panic, fixed.** `TestSocketDirIsShortPrivateAndRemoved` read `fi.Mode()` in its failure message even when `os.Stat` had failed. Grepping for the same pattern turned up two older `fi, _ := os.Stat(...)` lines in `sock_test.go` (from item 004), also fixed. All three now check the error first. Commit `test: check stat errors before reading file modes`.
+2. **The brief wasn't closed.** It is now.
+3. **§12's naming examples** still used "007 — Layout tree". They now use the finished item 006, so they can't go stale.
+4. **Approval wording.** This brief was approved with the user's "move on" in reply to "Reply approved…". The review rightly notes that §12 wants an explicit approval, so the merge waits for the user's explicit OK.
+
+**Verification:**
+- gofmt, `go vet` (darwin and linux), staticcheck and govulncheck are clean.
+- `go test -race -count=5` passes on `term`, `server`, `client`, `sock` and `testutil`.
