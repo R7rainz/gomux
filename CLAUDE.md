@@ -182,8 +182,11 @@ Dependencies point one way: `client → proto, sock, config`; `server → proto,
 
 - **One event-loop goroutine** in the server owns every session, window, pane and layout. Client connections and panes talk to it over channels, and it never blocks on I/O. This replaces lock-per-struct designs.
 - **Each pane's `term.Term`** (item 006) owns three goroutines:
-  - **reader:** continuously drains the PTY master into `Spec.Output` (the pane's emulator, guarded by its own mutex), which marks the pane dirty and notifies the loop. It must never stall: if nobody reads the PTY, the program in the pane blocks on write. It keeps draining even when `Output` fails.
-  - **writer:** writes queued input to the master. `Term.Write` never blocks the caller and fails once 1 MiB is pending, so a program that stops reading its input stalls only itself.
+  - **reader:** continuously drains the PTY master into `Spec.Output` (the pane's emulator, guarded by its own mutex), which marks the pane dirty and notifies the loop. It must never stall: if nobody reads the PTY, the program in the pane blocks on write. It keeps draining even when `Output` fails, and it discards anything still read after `Done()`, so a torn-down pane never receives output.
+  - **writer:** writes queued input to the master. `Term.Write` never blocks the caller.
+    - While input is queued or in flight, a write that would push the total past 1 MiB fails, so a program that stops reading its input stalls only itself.
+    - A write into an idle queue is accepted whatever its size (a large paste).
+    - Once the PTY breaks, `Write` fails rather than queuing input that would never be delivered.
   - **waiter:** `cmd.Wait()` reaps the process, then it waits up to 200 ms for the last output, closes the master and closes `Done()`. `ExitState()` gives the exit code or signal.
 - **Each pane's emulator reply pipe** (`x/vt`): query replies and encoded input both come out of `emu.Read`, an `io.Pipe` that blocks the emulator until someone reads. One goroutine per pane drains it into the PTY. Two caveats found in the spike:
   - Replies are written while the emulator's lock is held. If the app stops reading its input and the PTY's input buffer fills, the drain blocks, and with it the pane's emulator writes and screen reads. Drain into a buffer and write to the PTY from a separate goroutine, so a stuck app can stall only its own input.
@@ -228,10 +231,13 @@ IDs are monotonically increasing integers per server. They are never reused and 
   - Programs started with `nohup` or `setsid` keep running, as in tmux.
 - **Killing a pane** (`Term.Kill`, item 006):
   - `kill(-pgid, SIGHUP)`, which is what closing a terminal window sends; interactive shells pass it on to their jobs.
-  - After 2 s, `kill(-pgid, SIGKILL)`, then close the master.
-  - The program's PID is its process-group ID (`pty.StartWithSize` uses `setsid`). A reaped PID is never signalled, and PIDs ≤ 1 are refused.
+  - Wait up to 2 s for the **whole group** to empty, then `kill(-pgid, SIGKILL)` whatever is left. That includes members that ignore SIGHUP and outlive the main program (a bug the item 006 code review caught).
+  - Return once `Done()` closes. If nothing can be signalled (e.g. a `sudo` child), give up after a further 2 s, so server shutdown can't hang.
+  - The program's PID is its process-group ID (`pty.StartWithSize` uses `setsid`). PIDs ≤ 1 are refused.
+  - The group is signalled only while the pane is live or the group still has members. A group ID can't be reused while any member is alive.
+  - **After `Done()`, `Kill` does nothing.** The pane has ended, jobs it left behind follow "Pane exit" above, and its group ID could by then belong to an unrelated group after PID wraparound (macOS PIDs only go up to 99999).
   - **Why not just close the master:** on macOS `creack/pty` opens it as a blocking descriptor, and Go postpones the real `close()` while the reader goroutine is blocked in `read()`. Item 006 measured it: closing the master alone didn't hang up `sleep` within 2 s.
-- **Server shutdown** (`kill-server`, SIGTERM, SIGINT): stop accepting connections, `Kill` every pane in parallel (SIGHUP, then SIGKILL after the grace period), remove the socket and exit. Processes do not survive server shutdown; this must be stated in the README. If the server crashes, the kernel closes the PTY masters and the result is the same.
+- **Server shutdown** (`kill-server`, SIGTERM, SIGINT): stop accepting connections, `Kill` every pane in parallel (SIGHUP, then SIGKILL after the grace period), remove the socket and exit. No process in a live pane's process group survives server shutdown; this must be stated in the README. Not covered: jobs left behind by panes whose program had already exited, programs started with `nohup` or `setsid`, and jobs an interactive shell moved to their own group that ignore the hang-up it forwards. If the server crashes, the kernel closes the PTY masters and the result is the same.
   - The server survives SIGHUP by catching and discarding it (`signal.Notify`), **not** `signal.Ignore`. An ignored signal stays ignored in every program the server starts, which would make panes deaf to `Kill`'s hang-up. Found by item 006's security review; `TestHangupsHandledNotIgnored` guards it.
 - **Restoring the client terminal:** on exit, on panic and on server EOF, the client leaves the alternate screen, shows the cursor, turns off mouse, bracketed-paste and focus reporting, and restores cooked mode. Bubble Tea handles normal exit; the panic and EOF paths need explicit handling.
 
