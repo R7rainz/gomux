@@ -182,11 +182,19 @@ func cmdServer(args []string, _ io.Writer) error {
 	if err != nil {
 		return err
 	}
-	signal.Ignore(syscall.SIGHUP) // the server outlives the terminal that started it
+	handleHangups()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	log.Info("server started", "socket", path, "pid", os.Getpid(), "version", versionString(), "protocol", proto.Version)
 	return server.Serve(ctx, ln, versionString(), log)
+}
+
+// handleHangups lets the server outlive the terminal that started it. It
+// catches and discards SIGHUP rather than ignoring it: an ignored signal stays
+// ignored in every program the server starts, and pane programs must still
+// die from Term.Kill's hang-up (CLAUDE.md §6.6).
+func handleHangups() {
+	signal.Notify(make(chan os.Signal, 1), syscall.SIGHUP)
 }
 
 // openLog returns the server's logger: stderr with --foreground, otherwise
