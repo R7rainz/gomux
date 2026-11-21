@@ -16,6 +16,7 @@ import (
 
 	"github.com/R7rainz/gomux/internal/proto"
 	"github.com/R7rainz/gomux/internal/sock"
+	"github.com/R7rainz/gomux/internal/testutil"
 )
 
 // TestMain lets the test binary double as a fake old server (see
@@ -64,15 +65,11 @@ type env struct {
 	dir  string
 }
 
-// setup builds gomux with the race detector into a short /tmp directory
-// (macOS limits socket paths to 104 bytes) and points GOMUX_SOCKET there.
+// setup builds gomux with the race detector into a testutil.SocketDir and
+// points GOMUX_SOCKET there.
 func setup(t *testing.T) *env {
 	t.Helper()
-	dir, err := os.MkdirTemp("/tmp", "gmx")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
+	dir := testutil.SocketDir(t)
 	bin := filepath.Join(dir, "gomux")
 	if out, err := exec.Command("go", "build", "-race", "-o", bin, ".").CombinedOutput(); err != nil {
 		t.Fatalf("build: %v\n%s", err, out)
@@ -100,15 +97,6 @@ func (e *env) gomux(args ...string) (string, string, int) {
 		e.t.Fatal(err)
 	}
 	return stdout.String(), stderr.String(), code
-}
-
-func (e *env) waitFor(what string, ok func() bool) {
-	e.t.Helper()
-	for deadline := time.Now().Add(10 * time.Second); !ok(); time.Sleep(20 * time.Millisecond) {
-		if time.Now().After(deadline) {
-			e.t.Fatalf("timed out waiting for %s", what)
-		}
-	}
 }
 
 func (e *env) socketExists() bool { _, err := os.Stat(e.path); return err == nil }
@@ -156,7 +144,7 @@ func TestEndToEnd(t *testing.T) {
 	if err := srv.Start(); err != nil {
 		t.Fatal(err)
 	}
-	e.waitFor("the server's socket", e.socketExists)
+	testutil.Eventually(t, 10*time.Second, "the server's socket", e.socketExists)
 
 	if stdout, stderr, code := e.gomux("ls"); code != 0 || stdout != "no sessions\n" {
 		t.Fatalf("ls: code %d, stdout %q, stderr %q", code, stdout, stderr)
@@ -192,7 +180,7 @@ func TestKillServerStopsOldServer(t *testing.T) {
 	if err := old.Start(); err != nil {
 		t.Fatal(err)
 	}
-	e.waitFor("the old server's socket", e.socketExists)
+	testutil.Eventually(t, 10*time.Second, "the old server's socket", e.socketExists)
 
 	_, stderr, code := e.gomux("ls")
 	if code != 1 || !strings.Contains(stderr, "incompatible") || !strings.Contains(stderr, "gomux kill-server") {
@@ -218,7 +206,7 @@ func TestHangupsHandledNotIgnored(t *testing.T) {
 	if err := syscall.Kill(os.Getpid(), syscall.SIGHUP); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(50 * time.Millisecond) // still running: the hang-up was caught
+	time.Sleep(50 * time.Millisecond) // observation window: a SIGHUP that wasn't caught would end this process
 
 	out, err := exec.Command("/bin/sh", "-c", "kill -HUP $$; sleep 1; echo survived").CombinedOutput()
 	ee, ok := errors.AsType[*exec.ExitError](err)
