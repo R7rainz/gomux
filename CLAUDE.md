@@ -537,9 +537,9 @@ Resolve each one, then record the answer in the section it affects.
 Every feature, fix or chore is a **work item** with a number and a title. Each one gets a written brief that the user approves **before any code is written**.
 
 **Naming.**
-- Title: `NNN — Title`, with a zero-padded sequence number, e.g. `007 — Layout tree`.
+- Title: `NNN — Title`, with a zero-padded sequence number, e.g. `006 — PTY and process lifecycle`.
 - Brief: `docs/briefs/NNN-kebab-title.md`, copied from `docs/briefs/TEMPLATE.md`.
-- Branch: `<type>/NNN-kebab-title`, e.g. `feat/007-layout-tree`.
+- Branch: `<type>/NNN-kebab-title`, e.g. `feat/006-pty-lifecycle`.
 - One work item = one branch = one PR. A roadmap phase splits into several work items, each small enough to review in one sitting.
 - **Numbers are given when the brief is written.** Planned work is referred to by name ("the screen-state item"), so inserting an item never renumbers the plan.
 - **Where the brief is committed:** for feature work (items that get a PR), the approved brief is the PR's first commit, so the plan and the code are reviewed together. Setup and docs items commit their brief straight to `main`.
