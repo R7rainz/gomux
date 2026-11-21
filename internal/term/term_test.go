@@ -1,24 +1,17 @@
 package term
 
 import (
-	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/R7rainz/gomux/internal/testutil"
 )
-
-// output is a goroutine-safe sink for Spec.Output.
-type output struct {
-	mu sync.Mutex
-	b  bytes.Buffer
-}
-
-func (o *output) Write(p []byte) (int, error) { o.mu.Lock(); defer o.mu.Unlock(); return o.b.Write(p) }
-func (o *output) String() string              { o.mu.Lock(); defer o.mu.Unlock(); return o.b.String() }
 
 // sh runs script with /bin/sh on a 80x24 PTY. Scripts keep the tests
 // deterministic on Linux and macOS, whatever the user's shell is.
@@ -41,13 +34,11 @@ func waitDone(t *testing.T, tm *Term, within time.Duration) {
 	}
 }
 
-func waitOutput(t *testing.T, out *output, want string) {
+func waitOutput(t *testing.T, out *testutil.Buffer, want string) {
 	t.Helper()
-	for deadline := time.Now().Add(5 * time.Second); !strings.Contains(out.String(), want); time.Sleep(10 * time.Millisecond) {
-		if time.Now().After(deadline) {
-			t.Fatalf("output never contained %q; got %q", want, out.String())
-		}
-	}
+	testutil.Eventually(t, 5*time.Second, fmt.Sprintf("output containing %q", want), func() bool {
+		return strings.Contains(out.String(), want)
+	})
 }
 
 func signalOf(t *testing.T, tm *Term) syscall.Signal {
@@ -59,18 +50,16 @@ func signalOf(t *testing.T, tm *Term) syscall.Signal {
 	return ws.Signal()
 }
 
-// groupGone polls until the process group has no members left.
+// groupGone waits until the process group has no members left.
 func groupGone(t *testing.T, pgid int) {
 	t.Helper()
-	for deadline := time.Now().Add(2 * time.Second); syscall.Kill(-pgid, 0) == nil; time.Sleep(10 * time.Millisecond) {
-		if time.Now().After(deadline) {
-			t.Fatalf("process group %d still has members", pgid)
-		}
-	}
+	testutil.Eventually(t, 2*time.Second, fmt.Sprintf("process group %d to empty", pgid), func() bool {
+		return syscall.Kill(-pgid, 0) != nil
+	})
 }
 
 func TestOutputAndExitCode(t *testing.T) {
-	var out output
+	var out testutil.Buffer
 	tm := sh(t, "printf hello; exit 3", &out)
 	waitDone(t, tm, 5*time.Second)
 	if !strings.Contains(out.String(), "hello") {
@@ -86,7 +75,7 @@ func TestOutputAndExitCode(t *testing.T) {
 }
 
 func TestInput(t *testing.T) {
-	var out output
+	var out testutil.Buffer
 	tm := sh(t, `read x; printf "got-%s" "$x"`, &out)
 	if _, err := tm.Write([]byte("abc\n")); err != nil {
 		t.Fatal(err)
@@ -102,7 +91,7 @@ func TestInput(t *testing.T) {
 }
 
 func TestResize(t *testing.T) {
-	var out output
+	var out testutil.Buffer
 	tm := sh(t, "stty size; read _; stty size", &out)
 	waitOutput(t, &out, "24 80")
 	if err := tm.Resize(100, 30); err != nil {
@@ -134,8 +123,9 @@ func TestKillForcesStubbornGroup(t *testing.T) {
 	killGrace = 300 * time.Millisecond
 	t.Cleanup(func() { killGrace = old })
 	// The ignored SIGHUP is inherited by the sleep children: the whole group resists.
-	tm := sh(t, `trap "" HUP; while :; do sleep 1; done`, io.Discard)
-	time.Sleep(100 * time.Millisecond) // let the trap take effect
+	var out testutil.Buffer
+	tm := sh(t, `trap "" HUP; echo trapped; while :; do sleep 1; done`, &out)
+	waitOutput(t, &out, "trapped") // the trap is installed before Kill runs
 	start := time.Now()
 	tm.Kill()
 	if d := time.Since(start); d < killGrace {
@@ -148,7 +138,7 @@ func TestKillForcesStubbornGroup(t *testing.T) {
 }
 
 func TestDoneDoesNotWaitForOrphans(t *testing.T) {
-	var out output
+	var out testutil.Buffer
 	// The subshell ignores SIGHUP and keeps the PTY open after sh exits.
 	tm := sh(t, `(trap "" HUP; sleep 3) & echo started`, &out)
 	t.Cleanup(func() { _ = syscall.Kill(-tm.Pid(), syscall.SIGKILL) }) // the orphan shares sh's group
@@ -163,7 +153,7 @@ func TestNoDescriptorLeaks(t *testing.T) {
 	_ = first
 	// The shell's builtin test checks its own descriptors; an external program
 	// such as ls would add descriptors of its own.
-	var out output
+	var out testutil.Buffer
 	// First prove the probe sees an fd we open on purpose, so the check can't pass vacuously.
 	tm := sh(t, `exec 9</dev/null; [ -e /dev/fd/9 ] && echo probe-works; exec 9<&-
 for f in 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do [ -e /dev/fd/$f ] && echo "leaked-$f"; done; echo checked`, &out)
@@ -210,17 +200,11 @@ func TestInputCap(t *testing.T) {
 		t.Fatalf("a write into an idle queue was refused: %v", err)
 	}
 	// Wait until the writer has delivered those bytes (the PTY buffers them).
-	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+	testutil.Eventually(t, 5*time.Second, "the writer to deliver the queued input", func() bool {
 		tm.mu.Lock()
-		idle := len(tm.pending) == 0 && tm.inflight == 0
-		tm.mu.Unlock()
-		if idle {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the writer never delivered the queued input")
-		}
-	}
+		defer tm.mu.Unlock()
+		return len(tm.pending) == 0 && tm.inflight == 0
+	})
 	// While bytes are in flight to the program, they count against the cap.
 	tm.mu.Lock()
 	tm.inflight = 10
@@ -235,9 +219,9 @@ func TestInputCap(t *testing.T) {
 
 // startHUPImmune starts a pane whose background subshell ignores SIGHUP and
 // shares the pane's process group, waiting until it has installed its trap.
-func startHUPImmune(t *testing.T, mainCmd string) (*Term, *output) {
+func startHUPImmune(t *testing.T, mainCmd string) (*Term, *testutil.Buffer) {
 	t.Helper()
-	var out output
+	var out testutil.Buffer
 	tm := sh(t, `(trap "" HUP; echo immune-ready; sleep 1000) & `+mainCmd, &out)
 	t.Cleanup(func() { _ = syscall.Kill(-tm.Pid(), syscall.SIGKILL) }) // never leave the subshell behind
 	waitOutput(t, &out, "immune-ready")
@@ -274,7 +258,7 @@ func TestKillAfterDoneSignalsNothing(t *testing.T) {
 // Output that an orphaned job writes after Done must not reach Output: the
 // consumer (the pane's emulator) is torn down by then.
 func TestNoOutputAfterDone(t *testing.T) {
-	var out output
+	var out testutil.Buffer
 	tm := sh(t, `(trap "" HUP; while :; do echo tick; sleep 0.05; done) & echo started`, &out)
 	t.Cleanup(func() { _ = syscall.Kill(-tm.Pid(), syscall.SIGKILL) })
 	waitDone(t, tm, time.Second)
