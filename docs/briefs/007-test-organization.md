@@ -111,6 +111,16 @@ None.
 3. **§12's naming examples** still used "007 — Layout tree". They now use the finished item 006, so they can't go stale.
 4. **Approval wording.** This brief was approved with the user's "move on" in reply to "Reply approved…". The review rightly notes that §12 wants an explicit approval, so the merge waits for the user's explicit OK.
 
+**A flaky test from item 006, caught by this PR's macOS CI and fixed.**
+- **What failed:** `TestKillAfterDoneSignalsNothing` timed out waiting for the background subshell's `immune-ready` output.
+- **The race:** the pane's main command (`echo started`) exited at once, the pane ended about 200 ms later, and output after `Done` is discarded by design. On a slow runner the marker came too late.
+- **Reproduced locally:** under CPU load (12× `yes`), 7 of 40 runs failed.
+- **The fix:** readiness is now a flag file the subshell creates after installing its trap, and the main command also waits for it (commit `test(term): fix a race in the hup-immune helper`).
+- **Result:** 100 runs under the same load pass, and so do 10 loaded runs of every concurrent package, including the end-to-end tests.
+- **Recorded in CLAUDE.md §15** as two conventions:
+  - signal readiness with a flag file, not output the code under test may drop;
+  - run concurrency tests under CPU load before a PR.
+
 **Verification:**
 - gofmt, `go vet` (darwin and linux), staticcheck and govulncheck are clean.
-- `go test -race -count=5` passes on `term`, `server`, `client`, `sock` and `testutil`.
+- `go test -race -count=5` passes on `term`, `server`, `client`, `sock` and `testutil`, and 10 runs pass under CPU load.
