@@ -209,3 +209,23 @@ func TestKillServerStopsOldServer(t *testing.T) {
 		t.Fatal("old server's socket still there")
 	}
 }
+
+// TestHangupsHandledNotIgnored: the server must survive SIGHUP, but the
+// programs it starts must not inherit an ignored SIGHUP, or Term.Kill's
+// hang-up would never reach pane programs.
+func TestHangupsHandledNotIgnored(t *testing.T) {
+	handleHangups()
+	if err := syscall.Kill(os.Getpid(), syscall.SIGHUP); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond) // still running: the hang-up was caught
+
+	out, err := exec.Command("/bin/sh", "-c", "kill -HUP $$; sleep 1; echo survived").CombinedOutput()
+	ee, ok := errors.AsType[*exec.ExitError](err)
+	if !ok {
+		t.Fatalf("child survived its own SIGHUP (inherited an ignored SIGHUP?): output %q, err %v", out, err)
+	}
+	if ws := ee.Sys().(syscall.WaitStatus); !ws.Signaled() || ws.Signal() != syscall.SIGHUP {
+		t.Fatalf("child ended by %v, want SIGHUP", ee.ProcessState)
+	}
+}
