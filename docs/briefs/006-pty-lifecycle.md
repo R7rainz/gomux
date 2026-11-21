@@ -198,10 +198,8 @@ None.
 - **After:** the test asks the shell itself, using the builtin `[ -e /dev/fd/N ]` for 3–20.
 - **Self-check:** it first opens fd 9 on purpose and requires the probe to see it, so it can't pass vacuously.
 
-**Beyond the brief:** `reaped` is set under the same mutex that `signal()` checks, so a signal and the reaping can't interleave.
-
 **Security review: no security findings.** It covered:
-- signalling the wrong group (the PID ≤ 1 and reaped checks, and the `setsid` group);
+- signalling the wrong group (the PID ≤ 1 check and the `setsid` group);
 - descriptor leaks (both PTY ends and the server socket are close-on-exec);
 - argument injection (an explicit argument list, no shell);
 - untrusted output, which is never parsed or logged.
@@ -213,6 +211,20 @@ None.
 - **Fix:** commit `fix(cmd): handle sighup instead of ignoring it`, plus `TestHangupsHandledNotIgnored`. The test was shown to fail on the old code ("child survived its own SIGHUP").
 - **Scope:** this is outside the approved brief. It was raised with the user after the review, and they said to continue with the recommended path, fixing it in this PR. It is recorded in CLAUDE.md §6.6.
 
+**Code review (`/code-review high`) before merging, at the user's request to double-check everything.** It raised 7 findings. Each was checked against the code, and all are resolved in commit `fix(term): sweep the whole process group on kill`.
+
+1. **Kill stopped too early (important).**
+   - **The bug:** once SIGHUP killed the main program, `Kill` returned without SIGKILL. Group members that ignore SIGHUP survived pane kill and server shutdown.
+   - **The fix:** `Kill` now waits up to 2 s for the *whole group* to empty, then SIGKILLs what's left.
+   - **The test:** `TestKillSweepsGroupAfterMainDies`. The bug was reproduced against the old code: "old Kill left the HUP-immune subshell running".
+   - **What I didn't take:** the review also suggested sweeping when `Kill` is called after `Done`. Rejected, because the pane has ended, its leftover jobs follow the "like closing a window" decision, and its group ID may belong to an unrelated group after PID wraparound. `TestKillAfterDoneSignalsNothing` documents this.
+2. **The "can't interleave" claim was wrong.** `reaped` was set only after `wait4` had reaped the process. The flag is gone. Signals now go to the group only while the pane is live or the group still has members, and a group ID can't be reused while any member is alive (CLAUDE.md §6.6).
+3. **Output after `Done`.** The reader now discards output read after `Done`, so a torn-down pane's emulator never gets writes. Test: `TestNoOutputAfterDone`.
+4. **The input cap ignored in-flight bytes**, so the real cap was about 2 MiB. Now the queued and in-flight bytes are counted together. Also, a failed PTY write now marks the `Term` finished, so later `Write`s error instead of disappearing. `TestInputCap` covers the cap.
+5. **A paste over 1 MiB was always refused.** A write into an idle queue is now accepted whatever its size (`TestInputCap`).
+6. **An unsignallable process could hang `Kill`** (e.g. a `sudo` child, EPERM). The final wait is now bounded by a further `killGrace`.
+7. **The macOS writer goroutine could also stay parked.** Documented in the shortcut comment next to the reader's.
+
 **Verification:**
-- `go test -race -count=5 ./internal/term/` and the full race suite pass.
+- `go test -race -count=10 ./internal/term/` and the full race suite pass.
 - gofmt, `go vet` (darwin and linux), staticcheck v0.8.2 and govulncheck v1.9.0 ("No vulnerabilities found") are clean.
