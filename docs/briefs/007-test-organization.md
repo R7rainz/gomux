@@ -5,7 +5,7 @@ Phase: 2, housekeeping before the screen-state item (CLAUDE.md §9)
 Branch: `test/007-test-organization`. It changes code (tests), so it gets a PR (CLAUDE.md §14); this brief is the PR's first commit.
 Issue: none
 
-Approved 2026-11-21 ("move on", after the user asked for properly organized tests).
+Approved 2026-11-21 ("move on", after the user asked for properly organized tests); merge approved explicitly 2026-11-22 ("lets merge it").
 
 ## What it does
 
@@ -87,7 +87,7 @@ None. The item changes tests and documentation only, and touches no runtime trus
 - [x] `TestKillForcesStubbornGroup` waits for a `ready` marker instead of sleeping
 - [x] Same tests pass as before (names compared), plus the new ones
 - [x] CLAUDE.md: "Testing" section, planned items referred to by name
-- [ ] Code review of the diff clean; CI green; merged with Rebase and merge (waiting on the user's explicit approval, see Notes)
+- [x] Code review of the diff clean; CI green; merged with Rebase and merge (after the user's explicit approval, see Notes)
 
 ## Open questions
 
@@ -109,7 +109,7 @@ None.
 1. **A nil-dereference panic, fixed.** `TestSocketDirIsShortPrivateAndRemoved` read `fi.Mode()` in its failure message even when `os.Stat` had failed. Grepping for the same pattern turned up two older `fi, _ := os.Stat(...)` lines in `sock_test.go` (from item 004), also fixed. All three now check the error first. Commit `test: check stat errors before reading file modes`.
 2. **The brief wasn't closed.** It is now.
 3. **§12's naming examples** still used "007 — Layout tree". They now use the finished item 006, so they can't go stale.
-4. **Approval wording.** This brief was approved with the user's "move on" in reply to "Reply approved…". The review rightly notes that §12 wants an explicit approval, so the merge waits for the user's explicit OK.
+4. **Approval wording.** This brief was approved with the user's "move on" in reply to "Reply approved…". The review rightly notes that §12 wants an explicit approval, so the merge waited for the user's explicit OK, given on 2026-11-22.
 
 **A flaky test from item 006, caught by this PR's macOS CI and fixed.**
 - **What failed:** `TestKillAfterDoneSignalsNothing` timed out waiting for the background subshell's `immune-ready` output.
