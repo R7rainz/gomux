@@ -19,8 +19,12 @@ func TestSocketDirIsShortPrivateAndRemoved(t *testing.T) {
 		if p := filepath.Join(dir, "default.sock"); len(p) >= len(sa.Path) {
 			t.Fatalf("socket path %q is %d bytes, too long for this system", p, len(p))
 		}
-		if fi, err := os.Stat(dir); err != nil || fi.Mode().Perm() != 0o700 {
-			t.Fatalf("dir %v, mode %v: want a private 0700 directory", err, fi.Mode().Perm())
+		fi, err := os.Stat(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fi.Mode().Perm() != 0o700 {
+			t.Fatalf("mode %v, want a private 0700 directory", fi.Mode().Perm())
 		}
 	})
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {

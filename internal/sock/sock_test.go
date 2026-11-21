@@ -19,7 +19,9 @@ func TestPrivateDir(t *testing.T) {
 	if err := ensurePrivateDir(fresh, uid); err != nil {
 		t.Fatalf("creating: %v", err)
 	}
-	if fi, _ := os.Stat(fresh); fi.Mode().Perm() != 0o700 {
+	if fi, err := os.Stat(fresh); err != nil {
+		t.Fatal(err)
+	} else if fi.Mode().Perm() != 0o700 {
 		t.Fatalf("created with %#o, want 0700", fi.Mode().Perm())
 	}
 	if err := ensurePrivateDir(fresh, uid); err != nil {
@@ -60,7 +62,9 @@ func TestListenSocketMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o600 {
+	if fi, err := os.Stat(path); err != nil {
+		t.Fatal(err)
+	} else if fi.Mode().Perm() != 0o600 {
 		t.Fatalf("socket mode %#o, want 0600", fi.Mode().Perm())
 	}
 	ln.Close()
