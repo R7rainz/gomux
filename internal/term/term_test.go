@@ -204,10 +204,83 @@ func TestInputCap(t *testing.T) {
 	maxPending = 16
 	t.Cleanup(func() { maxPending = old })
 	tm := sh(t, "sleep 100", io.Discard)
-	if _, err := tm.Write(make([]byte, 17)); err == nil {
-		t.Fatal("a write over the cap was accepted")
+
+	// Into an idle queue, any size is accepted (a large paste).
+	if _, err := tm.Write(make([]byte, 32)); err != nil {
+		t.Fatalf("a write into an idle queue was refused: %v", err)
 	}
-	if _, err := tm.Write([]byte("fits\n")); err != nil {
-		t.Fatalf("a small write failed: %v", err)
+	// Wait until the writer has delivered those bytes (the PTY buffers them).
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		tm.mu.Lock()
+		idle := len(tm.pending) == 0 && tm.inflight == 0
+		tm.mu.Unlock()
+		if idle {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the writer never delivered the queued input")
+		}
+	}
+	// While bytes are in flight to the program, they count against the cap.
+	tm.mu.Lock()
+	tm.inflight = 10
+	tm.mu.Unlock()
+	if _, err := tm.Write(make([]byte, 7)); err == nil {
+		t.Fatal("a write past the cap (counting in-flight bytes) was accepted")
+	}
+	if _, err := tm.Write(make([]byte, 6)); err != nil {
+		t.Fatalf("a write within the cap failed: %v", err)
+	}
+}
+
+// startHUPImmune starts a pane whose background subshell ignores SIGHUP and
+// shares the pane's process group, waiting until it has installed its trap.
+func startHUPImmune(t *testing.T, mainCmd string) (*Term, *output) {
+	t.Helper()
+	var out output
+	tm := sh(t, `(trap "" HUP; echo immune-ready; sleep 1000) & `+mainCmd, &out)
+	t.Cleanup(func() { _ = syscall.Kill(-tm.Pid(), syscall.SIGKILL) }) // never leave the subshell behind
+	waitOutput(t, &out, "immune-ready")
+	return tm, &out
+}
+
+// Regression: Kill used to stop once the main program died from SIGHUP,
+// leaving HUP-ignoring members of its group running after pane kill and
+// server shutdown.
+func TestKillSweepsGroupAfterMainDies(t *testing.T) {
+	old := killGrace
+	killGrace = 300 * time.Millisecond
+	t.Cleanup(func() { killGrace = old })
+	tm, _ := startHUPImmune(t, "sleep 100")
+	tm.Kill()
+	if sig := signalOf(t, tm); sig != syscall.SIGHUP {
+		t.Fatalf("main program ended by %v, want SIGHUP", sig)
+	}
+	groupGone(t, tm.Pid()) // the HUP-immune subshell was SIGKILLed after the grace
+}
+
+// After Done the pane has ended: Kill signals nothing, as decided for jobs a
+// pane leaves behind (CLAUDE.md §6.6), and because the group ID could by then
+// belong to someone else.
+func TestKillAfterDoneSignalsNothing(t *testing.T) {
+	tm, _ := startHUPImmune(t, "echo started")
+	waitDone(t, tm, time.Second)
+	tm.Kill()
+	if err := syscall.Kill(-tm.Pid(), 0); err != nil {
+		t.Fatalf("Kill after Done touched the leftover job: %v", err)
+	}
+}
+
+// Output that an orphaned job writes after Done must not reach Output: the
+// consumer (the pane's emulator) is torn down by then.
+func TestNoOutputAfterDone(t *testing.T) {
+	var out output
+	tm := sh(t, `(trap "" HUP; while :; do echo tick; sleep 0.05; done) & echo started`, &out)
+	t.Cleanup(func() { _ = syscall.Kill(-tm.Pid(), syscall.SIGKILL) })
+	waitDone(t, tm, time.Second)
+	before := out.String()
+	time.Sleep(300 * time.Millisecond) // observation window: the orphan keeps printing
+	if after := out.String(); after != before {
+		t.Fatalf("output arrived after Done: %q", strings.TrimPrefix(after, before))
 	}
 }
