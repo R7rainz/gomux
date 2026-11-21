@@ -9,19 +9,14 @@ import (
 
 	"github.com/R7rainz/gomux/internal/proto"
 	"github.com/R7rainz/gomux/internal/sock"
+	"github.com/R7rainz/gomux/internal/testutil"
 )
 
-// fakeServer listens on a short /tmp path and runs script on the first
-// connection. Paths stay under /tmp because macOS limits socket paths to 104
-// bytes.
+// fakeServer listens on a socket in testutil.SocketDir and runs script on the
+// first connection.
 func fakeServer(t *testing.T, script func(c *net.UnixConn)) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("/tmp", "gmx")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
-	path := filepath.Join(dir, "s.sock")
+	path := filepath.Join(testutil.SocketDir(t), "s.sock")
 	ln, err := sock.Listen(path, false)
 	if err != nil {
 		t.Fatal(err)
