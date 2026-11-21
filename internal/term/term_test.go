@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -218,14 +220,24 @@ func TestInputCap(t *testing.T) {
 }
 
 // startHUPImmune starts a pane whose background subshell ignores SIGHUP and
-// shares the pane's process group, waiting until it has installed its trap.
-func startHUPImmune(t *testing.T, mainCmd string) (*Term, *testutil.Buffer) {
+// shares the pane's process group, and waits until that trap is installed.
+//
+// Readiness is a flag file the subshell creates after its trap, not printed
+// output: a mainCmd that exits at once ends the pane within drainTimeout, and
+// output after Done is discarded, so waiting for a printed marker raced and
+// failed on a slow CI runner. mainCmd also waits for the flag before running.
+func startHUPImmune(t *testing.T, mainCmd string) *Term {
 	t.Helper()
-	var out testutil.Buffer
-	tm := sh(t, `(trap "" HUP; echo immune-ready; sleep 1000) & `+mainCmd, &out)
+	flag := filepath.Join(t.TempDir(), "immune")
+	tm := sh(t, fmt.Sprintf(`(trap "" HUP; : > %[1]q; sleep 1000) &
+while [ ! -e %[1]q ]; do sleep 0.01; done
+%[2]s`, flag, mainCmd), io.Discard)
 	t.Cleanup(func() { _ = syscall.Kill(-tm.Pid(), syscall.SIGKILL) }) // never leave the subshell behind
-	waitOutput(t, &out, "immune-ready")
-	return tm, &out
+	testutil.Eventually(t, 5*time.Second, "the HUP-immune subshell to install its trap", func() bool {
+		_, err := os.Stat(flag)
+		return err == nil
+	})
+	return tm
 }
 
 // Regression: Kill used to stop once the main program died from SIGHUP,
@@ -235,7 +247,7 @@ func TestKillSweepsGroupAfterMainDies(t *testing.T) {
 	old := killGrace
 	killGrace = 300 * time.Millisecond
 	t.Cleanup(func() { killGrace = old })
-	tm, _ := startHUPImmune(t, "sleep 100")
+	tm := startHUPImmune(t, "sleep 100")
 	tm.Kill()
 	if sig := signalOf(t, tm); sig != syscall.SIGHUP {
 		t.Fatalf("main program ended by %v, want SIGHUP", sig)
@@ -247,7 +259,7 @@ func TestKillSweepsGroupAfterMainDies(t *testing.T) {
 // pane leaves behind (CLAUDE.md §6.6), and because the group ID could by then
 // belong to someone else.
 func TestKillAfterDoneSignalsNothing(t *testing.T) {
-	tm, _ := startHUPImmune(t, "echo started")
+	tm := startHUPImmune(t, "echo started")
 	waitDone(t, tm, time.Second)
 	tm.Kill()
 	if err := syscall.Kill(-tm.Pid(), 0); err != nil {
