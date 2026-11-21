@@ -7,22 +7,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/R7rainz/gomux/internal/testutil"
 )
 
-// tmpDir is a short directory under /tmp: t.TempDir() paths on macOS are too
-// long for a Unix socket (104-byte limit).
-func tmpDir(t *testing.T) string {
-	t.Helper()
-	d, err := os.MkdirTemp("/tmp", "gmx")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(d) })
-	return d
-}
-
 func TestPrivateDir(t *testing.T) {
-	base := tmpDir(t)
+	base := testutil.SocketDir(t)
 	uid := os.Getuid()
 
 	fresh := filepath.Join(base, "fresh")
@@ -65,7 +55,7 @@ func TestPrivateDir(t *testing.T) {
 }
 
 func TestListenSocketMode(t *testing.T) {
-	path := filepath.Join(tmpDir(t), "gomux", "s.sock")
+	path := filepath.Join(testutil.SocketDir(t), "gomux", "s.sock")
 	ln, err := Listen(path, true)
 	if err != nil {
 		t.Fatal(err)
@@ -80,7 +70,7 @@ func TestListenSocketMode(t *testing.T) {
 }
 
 func TestListenWhatsAlreadyThere(t *testing.T) {
-	dir := tmpDir(t)
+	dir := testutil.SocketDir(t)
 
 	// A live server: refuse.
 	live := filepath.Join(dir, "live.sock")
@@ -121,7 +111,7 @@ func TestListenWhatsAlreadyThere(t *testing.T) {
 }
 
 func TestDialAndPeer(t *testing.T) {
-	path := filepath.Join(tmpDir(t), "s.sock")
+	path := filepath.Join(testutil.SocketDir(t), "s.sock")
 	if _, err := Dial(path); !errors.Is(err, ErrNoServer) {
 		t.Fatalf("no server: got %v, want ErrNoServer", err)
 	}
