@@ -598,8 +598,14 @@ Security is checked at fixed points, not when someone remembers.
 - Stage files explicitly by path. Never use `git add -A` or `git add .`.
 
 **Pushing and opening PRs.**
-- For feature work, the agent pushes the branch, opens the PR with `gh` (title and body as below) and watches CI. The maintainer reviews and merges.
-- The agent never merges PRs and never pushes `main`. Setup and docs commits on `main` are pushed by the maintainer, unless they ask the agent to.
+- For feature work, the agent pushes the branch, opens the PR with `gh` (title and body as below) and watches CI.
+- **The agent merges its own PRs** (Rebase and merge, deleting the branch) once all of these hold:
+  1. The brief's test plan passes locally, including `go test -race ./...`.
+  2. A code review of the whole diff (`/code-review`) is clean. Every finding is fixed or explicitly rejected with a reason in the brief.
+  3. CI is green on ubuntu and macOS.
+  4. The PR description matches what is actually in it.
+  - This rule was set by the maintainer on 2026-11-21. Before that, the maintainer merged.
+- The agent doesn't push `main` directly. Setup and docs commits on `main` are pushed by the maintainer, unless they ask the agent to.
 - PRs are merged on GitHub with **Rebase and merge**, so the structured commits land on `main` unchanged and history stays linear.
 
 **Pull requests** are opened only for feature work items or when the user asks. Setup and docs-only changes are committed straight to `main`. A PR is scoped to one issue or work item.
