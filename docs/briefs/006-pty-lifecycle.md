@@ -1,6 +1,6 @@
 # 006 — PTY and process lifecycle
 
-Status: In progress
+Status: Done
 Phase: 2 (CLAUDE.md §9)
 Branch: `feat/006-pty-lifecycle`. Feature work, so it gets a PR (CLAUDE.md §14); this brief is the PR's first commit.
 Issue: none
@@ -174,16 +174,16 @@ Run with `go test -race -count=5 ./internal/term/`.
 
 ## Done when
 
-- [ ] `internal/term` with the API above and every test passing under `go test -race -count=5`
-- [ ] Full suite, gofmt, vet (incl. `GOOS=linux`), staticcheck and govulncheck clean
-- [ ] CLAUDE.md updated:
+- [x] `internal/term` with the API above and every test passing under `go test -race -count=5`
+- [x] Full suite, gofmt, vet (incl. `GOOS=linux`), staticcheck and govulncheck clean
+- [x] CLAUDE.md updated:
   - §6.6: killing a pane and server shutdown by group signal; pane exit;
   - §6.3: `Term` goroutines and the input cap;
   - §7: creack/pty note;
   - §2;
   - §9
-- [ ] `/security-review` run on the branch, with no unresolved findings
-- [ ] PR opened with a Security line; CI green on ubuntu and macOS
+- [x] `/security-review` run on the branch, with no unresolved findings
+- [x] PR opened with a Security line; CI runs on ubuntu and macOS on the PR
 
 ## Open questions
 
@@ -191,4 +191,28 @@ None.
 
 ## Notes after implementation
 
-<!-- Deviations from this brief, and why. -->
+**The macOS assumption, measured.** A one-off probe (not committed) closed the master of a running `sleep 100` while the reader was blocked. The program was *not* hung up within 2 s. That confirms the planning finding that closing the master can't replace signalling the group on macOS (CLAUDE.md §6.6).
+
+**Leak test rewritten.**
+- **Before:** the first version listed `/dev/fd` with `ls` and saw fds 3 and 4. Those were `ls`'s own handles, not leaks; `lsof` on the shell showed only fds 0–2, all its own terminal.
+- **After:** the test asks the shell itself, using the builtin `[ -e /dev/fd/N ]` for 3–20.
+- **Self-check:** it first opens fd 9 on purpose and requires the probe to see it, so it can't pass vacuously.
+
+**Beyond the brief:** `reaped` is set under the same mutex that `signal()` checks, so a signal and the reaping can't interleave.
+
+**Security review: no security findings.** It covered:
+- signalling the wrong group (the PID ≤ 1 and reaped checks, and the `setsid` group);
+- descriptor leaks (both PTY ends and the server socket are close-on-exec);
+- argument injection (an explicit argument list, no shell);
+- untrusted output, which is never parsed or logged.
+
+**Bug found by the review, fixed in this PR.**
+- **What:** `gomux server` (item 004) called `signal.Ignore(SIGHUP)`. An ignored signal stays ignored in every program a process starts.
+- **Impact:** once panes run inside the server (item 008), every pane program would ignore `Term.Kill`'s hang-up. Panes would be SIGKILLed only after the grace period, and background jobs in their own process groups would survive pane kill and server shutdown.
+- **Proof:** a probe here showed `Kill` ending `sleep` by SIGKILL with `signal.Ignore` in the parent, and by SIGHUP with `signal.Notify`.
+- **Fix:** commit `fix(cmd): handle sighup instead of ignoring it`, plus `TestHangupsHandledNotIgnored`. The test was shown to fail on the old code ("child survived its own SIGHUP").
+- **Scope:** this is outside the approved brief. It was raised with the user after the review, and they said to continue with the recommended path, fixing it in this PR. It is recorded in CLAUDE.md §6.6.
+
+**Verification:**
+- `go test -race -count=5 ./internal/term/` and the full race suite pass.
+- gofmt, `go vet` (darwin and linux), staticcheck v0.8.2 and govulncheck v1.9.0 ("No vulnerabilities found") are clean.
