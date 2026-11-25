@@ -36,10 +36,10 @@ Phases 0 and 1 are done:
 Phase 2 has started:
 - **Item 005** added a gofmt check to CI.
 - **Item 006** added `internal/term`, which runs a program on a PTY with input, output, resize, exit and kill.
-
 - **Item 007** organized the tests: shared helpers in `internal/testutil`, and the conventions in §15.
+- **Item 008** added server-side screen state: `term.Pane` attaches an `x/vt` emulator to a `Term`, answers terminal queries, takes key and paste events, and returns screen snapshots (`proto.Screen`). The installed-shell test matrix runs in CI.
 
-There are no sessions or panes yet. Next: the screen-state item (`x/vt` attached to a `Term`, plus the installed-shell test matrix).
+There are no sessions yet, and nothing draws a pane. Next: the `gomux new` item (server autostart, the first session, and a client that draws one pane).
 
 ## 3. Commands
 
@@ -52,6 +52,7 @@ go test ./...
 go test -race ./...                             # required before every change lands; the server is concurrent
 go test ./internal/layout -run '^TestSplit$' -v # single test
 go test ./internal/proto -run '^$' -fuzz FuzzRead -fuzztime 30s
+GOMUX_REQUIRE_SHELLS='sh dash bash zsh fish' go test ./internal/term -run TestShells -v  # shell matrix; listed shells must be installed
 gofmt -l .                                      # must print nothing; CI fails otherwise
 go vet ./...
 go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
@@ -179,7 +180,7 @@ internal/plugin/  built-in plugin interface and manager; one subpackage per plug
 internal/testutil/ helpers shared by tests only; never imported by production code (§15)
 ```
 
-Dependencies point one way: `client → proto, sock, config`; `server → proto, sock, layout, term, config, plugin`; `cmd/gomux` wires them together and resolves paths. `client` never imports `server` or `term`, and `layout` imports nothing internal. A cycle means the design is wrong. Don't paper over it with an interfaces package.
+Dependencies point one way: `client → proto, sock, config`; `server → proto, sock, layout, term, config, plugin`; `term → proto` (screen snapshots are wire types); `cmd/gomux` wires them together and resolves paths. `client` never imports `server` or `term`, and `layout` imports nothing internal. A cycle means the design is wrong. Don't paper over it with an interfaces package.
 
 ### 6.3 Concurrency
 
@@ -191,9 +192,10 @@ Dependencies point one way: `client → proto, sock, config`; `server → proto,
     - A write into an idle queue is accepted whatever its size (a large paste).
     - Once the PTY breaks, `Write` fails rather than queuing input that would never be delivered.
   - **waiter:** `cmd.Wait()` reaps the process, then it waits up to 200 ms for the last output, closes the master and closes `Done()`. `ExitState()` gives the exit code or signal.
-- **Each pane's emulator reply pipe** (`x/vt`): query replies and encoded input both come out of `emu.Read`, an `io.Pipe` that blocks the emulator until someone reads. One goroutine per pane drains it into the PTY. Two caveats found in the spike:
-  - Replies are written while the emulator's lock is held. If the app stops reading its input and the PTY's input buffer fills, the drain blocks, and with it the pane's emulator writes and screen reads. Drain into a buffer and write to the PTY from a separate goroutine, so a stuck app can stall only its own input.
-  - In `x/vt` v0.1.0, `Close()` races with a concurrent `Read` (an unsynchronized flag, found with the race detector). End the drain by closing `emu.InputPipe()` instead, until this is fixed upstream.
+- **Each pane's emulator** (`term.Pane`, item 008) is a plain `vt.Emulator` behind one mutex. Output from the reader, key and paste events, resize and snapshots all take it, so a snapshot is one consistent moment. `vt.SafeEmulator` was rejected: it locks per call (a 2,000-cell snapshot could catch a half-updated line) and its `Read` checks an unsynchronized flag.
+- **Each pane's emulator reply pipe** (`x/vt`): query replies and encoded input both come out of `emu.Read`, an `io.Pipe` that blocks the emulator until someone reads. One goroutine per pane (the reply drain) hands them to `Term.Write`. Two caveats found in the spike, both handled:
+  - Replies are written while the emulator's lock is held. If the app stops reading its input and the PTY's input buffer fills, a drain that wrote to the PTY would block, and with it the pane's emulator writes and screen reads. `Term.Write` never blocks (its queue is capped at 1 MiB), and once the queue is full the drain drops the bytes, so a stuck app stalls only its own input. `TestStuckProgramDoesNotStallScreen` guards this.
+  - In `x/vt` v0.1.0, `Close()` races with a concurrent `Read` (an unsynchronized flag, found with the race detector). The emulator's `Close` is never called. When the `Term` is done, a goroutine closes `emu.InputPipe()` instead, which ends the drain.
 - **Each client** has a reader goroutine (decode frames → loop) and a writer goroutine with a bounded queue. If a client is slow, its queued screen updates are dropped and replaced by a fresh snapshot. A slow client never blocks the loop or a pane.
 - **Render tick:** dirty panes go out to clients at most about 60 times per second, so `cat bigfile` cannot flood the socket.
 - Every goroutine has an owner and a `context` for shutdown. `go test -race` must pass.
@@ -205,7 +207,7 @@ Server   Sessions, Clients, PluginManager
 Session  ID, Name, Windows (ordered), ActiveWindow, CreatedAt, AttachedClients,
          Workspace (root dir, source .gomux.toml, if any)
 Window   ID, Name, Layout tree, ActivePane, Zoomed
-Pane     ID, Term (PTY + process + emulator), Cwd, Size, Title, ExitStatus
+Pane     ID, Term (a term.Pane: PTY + process + emulator), Cwd, Size, Title, ExitStatus
 ```
 
 IDs are monotonically increasing integers per server. They are never reused and never slice indexes. Names are user labels, and session names are unique per server. A window's displayed number is its position, which is separate from its ID.
@@ -226,8 +228,13 @@ IDs are monotonically increasing integers per server. They are never reused and 
   - Variables identifying the outer terminal are removed: `TERM_PROGRAM_VERSION`, `TERMINFO`, and `GHOSTTY_*` for Ghostty (add other terminals' variables as they're found). Otherwise shells and apps detect the outer terminal and use features our emulator doesn't implement.
   - `TERM` must advertise only what the emulator actually implements. Shipping our own terminfo entry is a non-goal.
 - **Output:** PTY bytes go into the emulator (screen, alternate screen, cursor, modes, scrollback ring). Output is never treated as plain text.
-- **Query replies:** the emulator's answers to device attributes, cursor-position reports and OSC 10/11 color queries are written back to the PTY. Without them, apps such as nvim and fish stall or misbehave.
-- **Resize:** client SIGWINCH → `resize` message → server recomputes the layout → `pty.Setsize` per pane (the kernel delivers SIGWINCH to the pane's foreground process group) → emulator resize. With several clients on one session, the most recently active client's size wins.
+- **Query replies:** the emulator's answers to device attributes, cursor-position reports and OSC 10/11 color queries are written back to the PTY. Without them, apps such as nvim and fish stall or misbehave (fish 4 shows no prompt until DA1 is answered).
+  - Every reply `x/vt` can write is numeric or fixed. It has no title reports, clipboard reads or DCS replies, so pane output can't make it type chosen text back into the shell (item 008 checked the source; `TestPaneAnswersQueriesButNotHostileOnes` pins it).
+  - **Known limits, both about default colors, to be solved together once a client draws panes:**
+    - `x/vt` answers OSC 10/11 queries with white on black, so apps pick dark-background colors even in a light terminal. Fix: the client reports the outer terminal's colors and the server sets them as the emulator's defaults.
+    - Default colors an app *sets* with OSC 10/11 (theme scripts such as base16-shell) aren't in snapshots: unstyled cells go out as the default (`""`). Fix: send the pane's default colors in `proto.Screen`.
+- **Resize:** client SIGWINCH → `resize` message → server recomputes the layout → per pane, `pty.Setsize` (the kernel delivers SIGWINCH to the pane's foreground process group), then emulator resize. Both happen under the pane's lock, which the app's output also needs, so its redraw lands in an emulator that already has the new size; a resize the PTY refuses changes nothing (`Pane.Resize`).
+- **Paste** (`Pane.Paste`): bracketed if the app turned that on, with ESC and C1 controls removed from the text so it can't close the bracket early and run the rest as typed input. A paste goes to the `Term` in one `Write`, so it is accepted or refused whole (never cut, never missing its closing bracket), and an empty write through the reply pipe first keeps it in order with keys. With several clients on one session, the most recently active client's size wins.
 - **Pane exit:** when the pane's *main* program exits, the pane closes, along with its window or session if it was the last one.
   - Its last output is drained for up to 200 ms. The pane doesn't wait for background jobs that still hold the PTY.
   - Those jobs get whatever the shell does on exit, the same as closing a terminal window (zsh and fish hang them up; bash only with `huponexit`).
@@ -389,7 +396,7 @@ type Plugin interface {
 | Need | Choice | Why / notes |
 |---|---|---|
 | PTY | `github.com/creack/pty` v1.1.24 | De facto standard, pure Go, Linux/macOS/BSD. No Windows, which matches the non-goal. Its `v2` tag (2023) never became a release; v1 is the maintained line.<br>The master is opened per OS: through Go's poller on Linux (closing it wakes a blocked reader), but as a blocking descriptor on macOS (closing it is postponed while a read is pending). That's why panes are killed by process-group signals (§6.6). |
-| VT emulation | `github.com/charmbracelet/x/vt` v0.1.0 | **Chosen by the prototype spike (item 002).** MIT, maintained by Charm, and shares its cell model (`ultraviolet`, `x/ansi`) with Bubble Tea v2.<br>• Passed every headless fixture: truecolor, alternate screen, scroll regions, wide characters and emoji, replies to DA, cursor-position and OSC 11 queries.<br>• Passed both security fixtures: it ignores title reports and clipboard reads.<br>• Encodes keys, paste and mouse by the app's modes.<br>• Worked with sh, dash, bash, zsh, fish, vim, nvim, lazygit, btop and less.<br>Caveats are in §6.3. Rejected: `vito/midterm` (breaks on emoji, doesn't answer OSC 11, has no key encoder, not goroutine-safe) and `hinshun/vt10x` (unmaintained since 2022). |
+| VT emulation | `github.com/charmbracelet/x/vt` v0.1.0 | **Chosen by the prototype spike (item 002); added in item 008.** Brings in `ultraviolet`, `x/ansi` and a few small indirect modules, all pure Go. MIT, maintained by Charm, and shares its cell model (`ultraviolet`, `x/ansi`) with Bubble Tea v2.<br>• Passed every headless fixture: truecolor, alternate screen, scroll regions, wide characters and emoji, replies to DA, cursor-position and OSC 11 queries.<br>• Passed both security fixtures: it ignores title reports and clipboard reads.<br>• Encodes keys, paste and mouse by the app's modes.<br>• Worked with sh, dash, bash, zsh, fish, vim, nvim, lazygit, btop and less.<br>Caveats are in §6.3. Rejected: `vito/midterm` (breaks on emoji, doesn't answer OSC 11, has no key encoder, not goroutine-safe) and `hinshun/vt10x` (unmaintained since 2022). |
 | Client UI | `charm.land/bubbletea/v2` v2.1.1 + `charm.land/lipgloss/v2` v2.1.1 | **v2 chosen by the spike;** v1 has had no release since September 2025. Its `View` is declarative (alternate screen, cursor position and shape, mouse mode), and its key events convert directly into the emulator's. Import from `charm.land/...`. Lipgloss v2's `Width`/`Height` include the border. Bubble Tea is for the interface only, not PTYs or emulation. |
 | Peer credentials | `golang.org/x/sys` v0.50.0 | Added in item 004. The Go team's own pure-Go extension of `syscall` (no cgo), already pulled in indirectly by Bubble Tea. The standard library has no peer-credential call on macOS. |
 | Config | `github.com/BurntSushi/toml` | `MetaData.Undecoded()` provides unknown-key warnings. |
@@ -414,8 +421,8 @@ type Plugin interface {
   - **Host terminal:** UTF-8 and 256 colors; truecolor recommended.
 - **Any shell.** gomux runs whatever shell or program the user picks and never depends on shell syntax or shell-specific integration.
   - The shell is `general.shell`, else `$SHELL`, else `/bin/sh`.
-  - End-to-end tests run every installed shell: at least sh, dash, bash, zsh and fish (CI installs zsh and fish), plus nushell where available.
-  - The prototype passed all five installed ones.
+  - The shell matrix (`internal/term/shells_test.go`, item 008) runs every installed shell as a login shell in a pane with a fresh `HOME`: sh, dash, bash, zsh, fish and nushell. Shells named in `GOMUX_REQUIRE_SHELLS` must be present.
+  - CI installs zsh and fish on ubuntu, and fish and nushell on macOS, and sets `GOMUX_REQUIRE_SHELLS` next to the install step, so nushell runs on macOS CI only.
 - **Non-functional targets** (measure, don't assume):
   - An idle server uses about 0% CPU: no timers fire when nothing changes and no client is attached.
   - Typing feels no slower than in the bare terminal.
@@ -445,8 +452,8 @@ This is the spec's phase order with four deliberate changes, marked ⚠. Each ph
 2. **Terminal engine.**
    - Built on `x/vt` with event-based input (§6.7, §7).
    - ✓ PTY spawn, I/O, resize, exit, kill: item 006 (`internal/term`).
-   - A single pane rendered from emulator snapshots and updates: the screen-state item, then the `gomux new` item.
-   - End-to-end tests run the shell matrix (§8) in CI.
+   - ✓ Server-side screen state and the shell matrix (§8) in CI: item 008 (`term.Pane`, `proto.Screen`).
+   - A single pane drawn from those snapshots by a client: the `gomux new` item.
    - Exit: nvim, btop and fish are usable in one pane, resize works, and no zombie processes are left.
    - ⚠ VT emulation moves here from the spec's Phase 5. Splits and reattach both need server-side screen state, so they cannot be built on raw byte forwarding. Phase 5 hardens the emulator.
 3. **Sessions.**
@@ -578,12 +585,13 @@ Security is checked at fixed points, not when someone remembers.
 | CI | Every push: `gofmt`, `govulncheck`, `go vet`, `staticcheck`, `go test -race`. Weekly: a scheduled `govulncheck`, so new CVEs in dependencies show up without a push. |
 
 **Trust boundaries in gomux** (what the checks look at):
-- **The socket.** Other local users are kept out by the 0600/0700 permissions, the refusal of unsafe directories, and the peer-UID check in both directions (§6.1). Malformed or oversized frames hit the size limit and the fuzzed decoder, and bad input never panics the server. Server-supplied text is stripped of control characters before the client prints it (`client.Printable`).
+- **The socket.** Other local users are kept out by the 0600/0700 permissions, the refusal of unsafe directories, and the peer-UID check in both directions (§6.1). Malformed or oversized frames hit the size limit and the fuzzed decoder, and bad input never panics the server. Sizes a client sends for panes are capped before they reach an emulator, which allocates cols × rows cells (from the `gomux new` item). Server-supplied text is stripped of control characters before the client prints it (`client.Printable`).
 - **Pane output is untrusted.** Any program, or `cat` of a downloaded file, can emit escape sequences, and they must never inject input into the shell.
   - Don't implement reports that echo attacker-controlled text back to the PTY (window and icon title reports).
   - Allow OSC 52 clipboard *writes* only, never clipboard reads.
   - Cap the size of titles and other OSC payloads.
   - Strip control characters from anything shown in gomux's own UI (titles, status bar).
+  - Pasted text loses ESC and C1 controls before it reaches a pane, so it can't end a bracketed paste early. Copy-mode text comes from pane output, so this matters once copy mode exists (`Pane.Paste`, item 008).
 - **`.gomux.toml` from cloned repos.** Commands run only after trust approval, and a changed file needs approval again (§6.10).
 - **Running external commands.** Plugins call `exec.Command(name, args...)` and never build a shell string from outside data such as branch or container names. Only user-approved workspace commands go through a shell.
 - **External plugins.** Permissions are denied by default, with memory and time limits (§6.12).
