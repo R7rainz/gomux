@@ -1,6 +1,6 @@
 # 008 — Server-side screen state
 
-Status: Approved
+Status: Done
 Phase: 2 (CLAUDE.md §9)
 Branch: `feat/008-screen-state`. Feature work, so it gets a PR (CLAUDE.md §14); this brief is the PR's first commit.
 Issue: none
@@ -246,12 +246,12 @@ Nothing is user-visible yet. The `gomux new` item sends these snapshots to a cli
 
 ## Done when
 
-- [ ] `term.Pane`: emulator attached, replies drained through `Term.Write`, keys and paste, resize, snapshot
-- [ ] Snapshot types in `internal/proto`
-- [ ] Shell matrix passing locally and in CI, with zsh and fish (ubuntu) and fish and nushell (macOS) installed by CI
-- [ ] CLAUDE.md updated (see Design)
-- [ ] `go test -race ./...` and `govulncheck ./...` pass; the race tests also pass under load
-- [ ] `/security-review` and `/code-review` findings fixed or rejected with a reason here
+- [x] `term.Pane`: emulator attached, replies drained through `Term.Write`, keys and paste, resize, snapshot
+- [x] Snapshot types in `internal/proto`
+- [x] Shell matrix passing locally (sh, dash, bash, zsh, fish); CI installs zsh and fish (ubuntu) and fish and nushell (macOS)
+- [x] CLAUDE.md updated (see Design and Notes)
+- [x] `go test -race ./...` and `govulncheck ./...` pass; the race tests also pass under load
+- [x] `/security-review` and `/code-review` findings fixed or rejected with a reason here
 - [ ] CI green; merged with Rebase and merge
 
 ## Open questions
@@ -261,3 +261,40 @@ None left. Answered at review on 2026-11-25:
 2. nushell is installed on macOS CI and is part of the matrix there (Design, the shell matrix).
 
 ## Notes after implementation
+
+**Who wrote `pane.go`.** The user typed the start of it (the `Pane` type and `StartPane`) to practise Go. It went into `term.go` by mistake, so it was moved to `pane.go` as the brief places it, and the rest was completed from the reference copy.
+
+**Deviations from the design above:**
+- **`Paste` returns an error and doesn't use `x/vt`'s `Paste`** (code review, finding 1). `x/vt` writes the opening bracket, the text and the closing bracket as three pipe writes, which the reply drain reads in 4 KiB pieces. Each piece counted against the 1 MiB input cap on its own, so two things could go wrong:
+  - a large paste, or any paste into a nearly full queue, lost pieces, possibly including its closing bracket, which leaves the app stuck in paste mode;
+  - pieces dropped from the middle left holes in the pasted text.
+  - **Now:** the pane tracks bracketed-paste mode through `x/vt`'s `EnableMode`/`DisableMode` callbacks. A full reset goes through them too (`resetModes` calls `setMode`). The pane builds the bytes itself and hands them to `Term.Write` in one call, so a paste is taken whole into an idle queue or refused whole with an error.
+  - **Ordering:** an empty write through the reply pipe first acts as a barrier. The drain receives it only after passing everything before it to the `Term`, so a paste can't overtake keys.
+- **Pasted text loses ESC and C1 controls** (code review, finding 4). Text containing `ESC [201~` would end the bracket early and run the rest as typed input. Copy-mode text will come from pane output, which is untrusted. Recorded in CLAUDE.md §6.6 and §13.
+- **`Resize` sets the PTY first, then the emulator** (code review, finding 3). Both happen under the pane's lock, which the program's output also needs, so its redraw still lands in the resized emulator. A resize the PTY refuses (after exit) now changes nothing; before, the emulator had already been resized.
+- **The shell probe has no "Device Attribute" check** (step 3 in Design). fish 4.9.3 contains no such warning text (checked with `strings`), and with DA1 unanswered it shows no prompt at all: swallowing DA1 made `TestShells/fish` fail at the prompt wait after 10 s. So the prompt wait is the real guard, and a comment says so.
+
+**Review findings rejected, with reasons:**
+- **Finding 2, "the matrix doesn't prove replies arrive"** (code review). As above: fish 4 shows no prompt until DA1 is answered, verified by experiment, so the prompt wait does prove it for fish 4. The DA1 path is also pinned directly by `TestPaneAnswersQueriesButNotHostileOnes`.
+- **Finding 5, "cap pane sizes in `Pane`"** (code review). Sizes come from clients, and that trust boundary arrives with the `gomux new` item. CLAUDE.md §13 now requires the cap there.
+  - Picking the limit needs the scrollback memory picture too: a scrollback line holds `cols` cells, so the column limit and `general.scrollback` bound memory together.
+  - Today's callers are tests.
+- **Finding 6, "default colors set by apps (OSC 10/11) are lost"** (code review). True, but sending them needs new `proto.Screen` fields and client drawing, which is the same work as the known OSC 10/11 query limit. Both are recorded together in CLAUDE.md §6.6 for when a client draws panes.
+- **Finding 7, brief status and the blinking-cursor case** (code review): fixed. `TestSnapshotCursor` now covers a blinking bar (`ESC [5 q`) and a hidden steady underline.
+- **`/security-review`: no findings.**
+  - Every reply `x/vt` writes is fixed or numeric.
+  - It has no OSC 52, no DCS/APC/PM/SOS handlers and no title report.
+  - A probe confirmed that C1 controls, DEL, bidi overrides and malformed UTF-8 never reach a cell.
+
+**Regression tests, each shown to fail on the old code** (CLAUDE.md §15):
+- `TestStuckProgramDoesNotStallScreen`: with replies written straight to the PTY, it hangs in `Snapshot` (seen with `-timeout 30s`).
+- `TestPaneAnswersQueriesButNotHostileOnes`: with a handler that answers title reports, the input reads `got:E]levil-title…`.
+- `TestLargePasteArrivesWhole`, `TestPasteCannotEndTheBracketEarly`, `TestPasteRefusedWholeWhenQueueFull`, and the resize check in `TestPaneAfterExit` all fail with `x/vt`'s `Paste` and the old `Resize`.
+
+**A flake caught under load and fixed before commit.** `TestStuckProgramDoesNotStallScreen` first waited for `pending > maxPending/2`. Under load the writer takes larger batches, so most queued bytes are in flight and `pending` stays small even with the queue full (3 failures in 30 loaded runs). It now waits for pending plus in-flight bytes to reach the cap, and passes 60 of 60 loaded runs.
+
+**Verification:**
+- gofmt, `go vet` and staticcheck are clean on darwin and linux; govulncheck finds nothing.
+- `go test -race ./...` passes, and `term` passes `-count=5`.
+- Under CPU load (12× `yes`): `term` passes 10 runs, and the paste and stuck tests pass 40.
+- The shell matrix passes locally for sh, dash, bash, zsh and fish. nushell isn't installed here, so its probe is first verified by macOS CI.
