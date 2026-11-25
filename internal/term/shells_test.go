@@ -77,8 +77,11 @@ func TestShells(t *testing.T) {
 func startShell(t *testing.T, name, path string) *Pane {
 	t.Helper()
 	home := t.TempDir()
-	// Without a .zshrc, zsh starts its first-run wizard, which takes the keyboard.
-	if err := os.WriteFile(filepath.Join(home, ".zshrc"), nil, 0o600); err != nil {
+	// Two zsh questions would eat the typed probe: the first-run wizard (shown
+	// when HOME has no startup file) and, on Debian and Ubuntu, the global
+	// zshrc's compinit asking about "insecure directories", which CI runners
+	// have. skip_global_compinit is Debian's switch for the latter.
+	if err := os.WriteFile(filepath.Join(home, ".zshenv"), []byte("skip_global_compinit=1\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	env := []string{"HOME=" + home, "PATH=" + os.Getenv("PATH"), "TERM=xterm-256color"}
