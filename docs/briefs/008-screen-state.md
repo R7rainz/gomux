@@ -293,6 +293,12 @@ None left. Answered at review on 2026-11-25:
 
 **A flake caught under load and fixed before commit.** `TestStuckProgramDoesNotStallScreen` first waited for `pending > maxPending/2`. Under load the writer takes larger batches, so most queued bytes are in flight and `pending` stays small even with the queue full (3 failures in 30 loaded runs). It now waits for pending plus in-flight bytes to reach the cap, and passes 60 of 60 loaded runs.
 
+**First CI run: zsh failed on ubuntu, and the fix is in the test.**
+- **The cause:** Ubuntu's global `/etc/zsh/zshrc` runs `compinit`. On the GitHub runner it found "insecure directories" and asked `[y]/[n]`. The probe's first typed letter answered it, and the rest ran as `cho AB""CD`.
+- **The fix:** the test's `HOME` now has a `.zshenv` with `skip_global_compinit=1`. That is Debian's switch for this, and it also stops zsh's first-run wizard, so it replaces the empty `.zshrc`.
+- **Diagnosis:** a failing matrix test now prints the shell's screen (commit `test(term): show the shell's screen when the matrix fails`). That's how this was found.
+- **nushell:** passed on macOS CI in that same first run.
+
 **Verification:**
 - gofmt, `go vet` and staticcheck are clean on darwin and linux; govulncheck finds nothing.
 - `go test -race ./...` passes, and `term` passes `-count=5`.
