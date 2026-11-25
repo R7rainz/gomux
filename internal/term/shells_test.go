@@ -92,5 +92,10 @@ func startShell(t *testing.T, name, path string) *Pane {
 		t.Fatal(err)
 	}
 	t.Cleanup(p.Kill)
+	t.Cleanup(func() { // runs first (cleanups are LIFO): show what the shell showed
+		if t.Failed() {
+			t.Logf("%s's screen:\n%s", name, screenText(p.Snapshot()))
+		}
+	})
 	return p
 }
