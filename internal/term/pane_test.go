@@ -74,6 +74,13 @@ func TestSnapshotTurnsCellsIntoStyledRuns(t *testing.T) {
 			{Text: "A", Style: proto.Style{Fg: "1"}},
 			{Text: "B", Style: proto.Style{Fg: "200", Bg: "4"}},
 		}},
+		{"same RGB in different kinds of color stays apart", "\x1b[91mA\x1b[38;5;196mB\x1b[38;2;255;0;0mC\x1b[30mD\x1b[38;5;16mE", proto.Line{
+			{Text: "A", Style: proto.Style{Fg: "9"}},
+			{Text: "B", Style: proto.Style{Fg: "196"}},
+			{Text: "C", Style: proto.Style{Fg: "#ff0000"}},
+			{Text: "D", Style: proto.Style{Fg: "0"}},
+			{Text: "E", Style: proto.Style{Fg: "16"}},
+		}},
 		{"attributes", "\x1b[1;3;7mX", proto.Line{{Text: "X", Style: proto.Style{Attrs: proto.AttrBold | proto.AttrItalic | proto.AttrReverse}}}},
 		{"curly underline with a color", "\x1b[4:3;58;5;9mX", proto.Line{{Text: "X", Style: proto.Style{Underline: proto.UnderlineCurly, UnderlineColor: "9"}}}},
 		{"wide characters once each", "日本👍🏽.", proto.Line{{Text: "日本👍🏽."}}},
