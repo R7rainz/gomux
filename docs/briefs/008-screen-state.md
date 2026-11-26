@@ -280,7 +280,7 @@ None left. Answered at review on 2026-11-25:
   - Picking the limit needs the scrollback memory picture too: a scrollback line holds `cols` cells, so the column limit and `general.scrollback` bound memory together.
   - Today's callers are tests.
 - **Finding 6, "default colors set by apps (OSC 10/11) are lost"** (code review). True, but sending them needs new `proto.Screen` fields and client drawing, which is the same work as the known OSC 10/11 query limit. Both are recorded together in CLAUDE.md §6.6 for when a client draws panes.
-- **Finding 7, brief status and the blinking-cursor case** (code review): fixed. `TestSnapshotCursor` now covers a blinking bar (`ESC [5 q`) and a hidden steady underline.
+- **Finding 7, brief status and the blinking-cursor case** (code review): fixed. `TestSnapshotReportsTheCursor` now covers a blinking bar (`ESC [5 q`) and a hidden steady underline.
 - **`/security-review`: no findings.**
   - Every reply `x/vt` writes is fixed or numeric.
   - It has no OSC 52, no DCS/APC/PM/SOS handlers and no title report.
@@ -289,7 +289,7 @@ None left. Answered at review on 2026-11-25:
 **Regression tests, each shown to fail on the old code** (CLAUDE.md §15):
 - `TestStuckProgramDoesNotStallScreen`: with replies written straight to the PTY, it hangs in `Snapshot` (seen with `-timeout 30s`).
 - `TestPaneAnswersQueriesButNotHostileOnes`: with a handler that answers title reports, the input reads `got:E]levil-title…`.
-- `TestLargePasteArrivesWhole`, `TestPasteCannotEndTheBracketEarly`, `TestPasteRefusedWholeWhenQueueFull`, and the resize check in `TestPaneAfterExit` all fail with `x/vt`'s `Paste` and the old `Resize`.
+- `TestLargePasteArrivesWhole`, `TestPasteCannotEndTheBracketEarly`, `TestPasteRefusedWholeWhenQueueFull`, and the resize check in `TestPaneKeepsLastScreenAfterExit` all fail with `x/vt`'s `Paste` and the old `Resize`.
 
 **A flake caught under load and fixed before commit.** `TestStuckProgramDoesNotStallScreen` first waited for `pending > maxPending/2`. Under load the writer takes larger batches, so most queued bytes are in flight and `pending` stays small even with the queue full (3 failures in 30 loaded runs). It now waits for pending plus in-flight bytes to reach the cap, and passes 60 of 60 loaded runs.
 
@@ -298,6 +298,19 @@ None left. Answered at review on 2026-11-25:
 - **The fix:** the test's `HOME` now has a `.zshenv` with `skip_global_compinit=1`. That is Debian's switch for this, and it also stops zsh's first-run wizard, so it replaces the empty `.zshrc`.
 - **Diagnosis:** a failing matrix test now prints the shell's screen (commit `test(term): show the shell's screen when the matrix fails`). That's how this was found.
 - **nushell:** passed on macOS CI in that same first run.
+
+**Second code review** (after the fixes above), 7 findings:
+- **Fixed: wrong colors in snapshot runs** (important, confirmed by the reviewer and by a test that fails on the old code).
+  - The run-building shortcut compared `x/vt` styles with `Style.Equal`, which matches colors by RGB. So palette 9, palette 196 and `#ff0000` merged into one run that carried the first one's color.
+  - The shortcut is gone: every cell's converted `proto.Style` is compared. That costs one `colorOf` per cell (a `Sprintf` for truecolor); fine until profiling says otherwise.
+  - Commit `fix(term): keep color kinds apart in snapshot runs`.
+- **Fixed: pasted line breaks.** They are now sent as CR, what Enter sends, as real terminals and tmux do. LF had arrived as Ctrl-J in raw-mode apps. `TestPasteSendsLineBreaksAsEnter` fails on the old code.
+- **Fixed: test names and the cursor table** (CLAUDE.md §15). Pane tests are named after the behavior they prove, and `TestSnapshotReportsTheCursor` is table-driven.
+- **Recorded as a requirement for the client: runs carry no column positions.** The client must measure graphemes with `x/vt`'s width rules (CLAUDE.md §6.7). Start columns get added to runs only if the two must ever disagree.
+- **Rejected: "the matrix may type before the line editor is ready".**
+  - It was inferred, not reproduced. All five local shells pass 10 runs under CPU load, and every shell passed on CI.
+  - If it ever flakes, the failure now prints the shell's screen, and the fix would be a known prompt string per shell in the test `HOME`.
+- **Rejected again: the pane-size cap,** for the same reason as in the first review. The cap belongs where client sizes enter (CLAUDE.md §13), with the scrollback memory limit.
 
 **Verification:**
 - gofmt, `go vet` and staticcheck are clean on darwin and linux; govulncheck finds nothing.
