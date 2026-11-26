@@ -96,7 +96,8 @@ func (p *Pane) SendKey(k vt.KeyPressEvent) {
 
 // Paste sends text as one paste, bracketed if the program turned that on.
 // ESC and C1 controls are removed from text, so it can't end the bracket
-// early and have the rest run as typed input (CLAUDE.md §13).
+// early and have the rest run as typed input (CLAUDE.md §13). Line breaks
+// are sent as CR, which is what Enter sends, as real terminals and tmux do.
 //
 // A paste is all or nothing: it goes to the Term in a single Write, which
 // takes it whole into an idle input queue, or refuses it whole with an error
@@ -109,7 +110,7 @@ func (p *Pane) Paste(text string) error {
 			return -1
 		}
 		return r
-	}, text)
+	}, strings.NewReplacer("\r\n", "\r", "\n", "\r").Replace(text))
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.bracketedPaste {

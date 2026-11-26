@@ -183,6 +183,19 @@ sleep 100`)
 	waitScreen(t, p, "1b5b3230307e"+"615b3230317e6263"+"1b5b3230317e")
 }
 
+// Pasted line breaks arrive as CR, what Enter sends, whether the text used
+// LF or CRLF. (-icrnl keeps the terminal from turning CR back into LF.)
+func TestPasteSendsLineBreaksAsEnter(t *testing.T) {
+	p := shPane(t, `stty -icanon -echo -icrnl; echo ready
+dd bs=1 count=5 2>/dev/null | od -An -tx1 | tr -d ' \n'; echo
+sleep 100`)
+	waitScreen(t, p, "ready")
+	if err := p.Paste("a\nb\r\nc"); err != nil {
+		t.Fatal(err)
+	}
+	waitScreen(t, p, "610d620d63") // a CR b CR c
+}
+
 // Keys typed before and after a paste reach the program in that order, even
 // though the paste skips the emulator's pipe.
 func TestPasteKeepsOrderWithKeys(t *testing.T) {
