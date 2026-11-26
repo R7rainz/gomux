@@ -178,7 +178,6 @@ func lineAt(e *vt.Emulator, y, cols int) proto.Line {
 	l := proto.Line{}
 	var text strings.Builder
 	var st proto.Style
-	var last *uv.Style // st was converted from this; converting is skipped while styles repeat
 	flush := func() {
 		if text.Len() > 0 {
 			l = append(l, proto.Run{Text: text.String(), Style: st})
@@ -193,12 +192,11 @@ func lineAt(e *vt.Emulator, y, cols int) proto.Line {
 		if c.Width == 0 {
 			continue // the second column of a wide character
 		}
-		if last == nil || !last.Equal(&c.Style) {
-			if s := styleOf(&c.Style); s != st {
-				flush()
-				st = s
-			}
-			last = &c.Style
+		// Compare converted styles: x/vt's Style.Equal matches colors by RGB, so
+		// palette 9, palette 196 and #ff0000 would merge into one run.
+		if s := styleOf(&c.Style); s != st {
+			flush()
+			st = s
 		}
 		if c.Content == "" {
 			text.WriteByte(' ')
