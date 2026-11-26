@@ -61,7 +61,7 @@ func within(t *testing.T, d time.Duration, what string, f func()) {
 
 func key(code rune) vt.KeyPressEvent { return vt.KeyPressEvent{Code: code} }
 
-func TestSnapshotLines(t *testing.T) {
+func TestSnapshotTurnsCellsIntoStyledRuns(t *testing.T) {
 	cases := []struct {
 		name, output string
 		want         proto.Line
@@ -99,19 +99,22 @@ func TestSnapshotLines(t *testing.T) {
 	}
 }
 
-func TestSnapshotCursor(t *testing.T) {
+// Each step's sequence is written after the previous ones, on one emulator.
+func TestSnapshotReportsTheCursor(t *testing.T) {
 	e := vt.NewEmulator(20, 5)
-	_, _ = e.WriteString("\x1b[2;4H")
-	if c := snapshot(e).Cursor; c != (proto.Cursor{X: 3, Y: 1, Shape: proto.CursorBlock, Blink: true}) {
-		t.Fatalf("default cursor: %+v", c)
+	steps := []struct {
+		name, output string
+		want         proto.Cursor
+	}{
+		{"moved, default look", "\x1b[2;4H", proto.Cursor{X: 3, Y: 1, Shape: proto.CursorBlock, Blink: true}},
+		{"blinking bar", "\x1b[5 q", proto.Cursor{X: 3, Y: 1, Shape: proto.CursorBar, Blink: true}},
+		{"hidden steady underline", "\x1b[?25l\x1b[4 q", proto.Cursor{X: 3, Y: 1, Hidden: true, Shape: proto.CursorUnderline}},
 	}
-	_, _ = e.WriteString("\x1b[5 q") // blinking bar
-	if c := snapshot(e).Cursor; c != (proto.Cursor{X: 3, Y: 1, Shape: proto.CursorBar, Blink: true}) {
-		t.Fatalf("blinking bar: %+v", c)
-	}
-	_, _ = e.WriteString("\x1b[?25l\x1b[4 q") // hide; steady underline
-	if c := snapshot(e).Cursor; c != (proto.Cursor{X: 3, Y: 1, Hidden: true, Shape: proto.CursorUnderline}) {
-		t.Fatalf("hidden steady underline: %+v", c)
+	for _, st := range steps {
+		_, _ = e.WriteString(st.output)
+		if c := snapshot(e).Cursor; c != st.want {
+			t.Fatalf("%s: got %+v, want %+v", st.name, c, st.want)
+		}
 	}
 }
 
@@ -234,7 +237,7 @@ func TestPasteRefusedWholeWhenQueueFull(t *testing.T) {
 	}
 }
 
-func TestPaneResize(t *testing.T) {
+func TestResizeReachesProgramAndScreen(t *testing.T) {
 	p := shPane(t, `stty size; read _; stty size; sleep 100`)
 	waitScreen(t, p, "24 80")
 	if err := p.Resize(100, 30); err != nil {
@@ -277,7 +280,7 @@ func TestStuckProgramDoesNotStallScreen(t *testing.T) {
 	within(t, 5*time.Second, "Kill", p.Kill)
 }
 
-func TestPaneAfterExit(t *testing.T) {
+func TestPaneKeepsLastScreenAfterExit(t *testing.T) {
 	p := shPane(t, `printf bye`)
 	select {
 	case <-p.Done():
@@ -306,7 +309,7 @@ func TestPaneAfterExit(t *testing.T) {
 	})
 }
 
-func TestStartPaneErrors(t *testing.T) {
+func TestStartPaneRefusesBadSpecs(t *testing.T) {
 	cases := map[string]Spec{
 		"output set":         {Path: "/bin/sh", Cols: 80, Rows: 24, Output: io.Discard},
 		"missing executable": {Path: "/nonexistent/gomux-test", Cols: 80, Rows: 24},
